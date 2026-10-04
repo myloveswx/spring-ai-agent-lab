@@ -1,0 +1,61 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: spring-ai-agent-lab
+
+  ai:
+    # ===================================================================
+    # Stage 1-6：DeepSeek 对话模型
+    # ===================================================================
+    deepseek:
+      # API Key 从环境变量读取，绝不写死在代码或配置文件里
+      #   Windows PowerShell :  $env:DEEPSEEK_API_KEY="sk-xxxx"
+      #   Windows CMD        :  set DEEPSEEK_API_KEY=sk-xxxx
+      #   macOS / Linux      :  export DEEPSEEK_API_KEY=sk-xxxx
+      api-key: ${DEEPSEEK_API_KEY:}
+      chat:
+        # 可选值：deepseek-chat / deepseek-reasoner
+        model: deepseek-chat
+        temperature: 0.7
+        # 打开 DeepSeek 思考模式：
+        # thinking:
+        #   type: enabled
+
+    chat:
+      client:
+        # =================================================================
+        # Stage 6：渐进式工具披露（Progressive Tool Disclosure）
+        # 开启后，Spring Boot 自动装配的那个 ChatClient.Builder 会用
+        # ToolSearchToolCallingAdvisor 替换默认的 ToolCallingAdvisor。
+        # 注意：只影响「注入的 ChatClient.Builder」，Stage 1-5 用
+        # ChatClient.builder(chatModel) 手工构建，因此不受影响。
+        # =================================================================
+        tool-search-advisor:
+          enabled: true
+          # regex（默认，零额外依赖）/ lucene / vector
+          tool-index-type: regex
+
+    # ===================================================================
+    # Stage 7：MCP 客户端，默认关闭
+    # 需要体验时把 enabled 改成 true，或使用 mcp profile：
+    #   mvn spring-boot:run -Dspring-boot.run.profiles=mcp
+    # 详见 application-mcp.yml.example 与 README
+    # ===================================================================
+    mcp:
+      client:
+        enabled: false
+
+logging:
+  level:
+    root: INFO
+    com.agentlab: DEBUG
+    # 打开后可在控制台看到每次请求的完整 Prompt 与模型响应
+    org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor: DEBUG
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
