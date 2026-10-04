@@ -66,6 +66,17 @@ mvn spring-boot:run
 mvn test
 ```
 
+### 4. 打开接口文档（Swagger UI）
+
+启动后访问：
+
+| 入口 | 地址 | 说明 |
+|---|---|---|
+| Swagger UI | http://localhost:8080/swagger-ui/index.html | 可视化界面，可直接「Try it out」 |
+| OpenAPI JSON | http://localhost:8080/v3/api-docs | 机器可读，喂给 Postman / Apifox / 代码生成器 |
+
+> 换了端口就把 `8080` 换掉；`OpenApiConfig` 里声明的 `servers` 只是给「Try it out」用的默认目标地址，不影响文档本身的生成。
+
 ---
 
 ## 7 个阶段
@@ -236,6 +247,85 @@ curl "http://localhost:8080/stage7/chat?message=列出 D:/workspace 下的文件
 
 ---
 
+## 接口文档（Swagger / OpenAPI）
+
+24 个接口分布在 7 个阶段里，靠 curl 手敲很容易记混。项目引入了 **springdoc-openapi 3.1.1** 自动生成 OpenAPI 3.1 文档。
+
+### 为什么是 3.x，不是 2.x
+
+springdoc 的版本线跟着 Spring Boot 的大版本走：
+
+| springdoc | 对应 Spring Boot |
+|---|---|
+| 2.8.x | 3.x |
+| **3.1.1** | **4.x**（官方 pom 的 parent 就是 `spring-boot-starter-parent:4.1.0`） |
+
+本项目是 Boot 4.1.1，所以必须用 3.x。用 2.8.x 会在自动配置阶段就失败（Spring Framework 7 下条件注解与类签名不匹配），不是「跑起来功能不对」那么温柔。
+
+```xml
+<dependency>
+    <groupId>org.springdoc</groupId>
+    <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+    <version>3.1.1</version>
+</dependency>
+```
+
+`webmvc` vs `webflux` 别选错：本项目是 Spring MVC（Servlet），要 `-webmvc-ui`。
+
+### 两个入口
+
+```bash
+# 可视化界面（可直接发请求）
+curl "http://localhost:8080/swagger-ui/index.html"
+
+# 机器可读的 OpenAPI JSON
+curl "http://localhost:8080/v3/api-docs"
+```
+
+### 注解约定
+
+| 注解 | 打在哪 | 作用 |
+|---|---|---|
+| `@Tag` | Controller 类 | 接口分组（对应 UI 上的折叠块） |
+| `@Operation` | 方法 | 接口的 summary / description |
+| `@Parameter` | 方法参数 | 参数含义、示例值（`defaultValue` 会自动带出） |
+| `@Schema` | DTO 类 / 字段 | 字段含义、示例、取值约束 |
+
+**分组名集中定义在 `OpenApiConfig` 里，控制器引用常量**：
+
+```java
+// OpenApiConfig
+public static final String TAG_STAGE3 = "Stage 3 · 工具调用";
+
+// 控制器
+@Tag(name = OpenApiConfig.TAG_STAGE3)
+```
+
+这样做的原因是 springdoc 按 **Tag 名字符串**做匹配：只要控制器上写的名字和配置里声明的差一个空格，那个分组就会掉到列表末尾、描述丢失，而且**不报错**，纯靠肉眼发现。用常量能从编译期就杜绝这种漂移。
+
+> 分组名称前缀是 `Stage 1 … Stage 7`。`application.yml` 里 `tags-sorter: alpha` 正好把它们排成 1→7（中文分组排在其后）。一旦出现两位数（比如 Stage 10），alpha 会把它排到 Stage 2 前面 —— 那时把 `tags-sorter` 去掉、改用配置类里 `tags` 的声明顺序。
+
+### 四个已知边界（读文档时别被误导）
+
+1. **SSE 流式接口在 Swagger UI 里不流式**。`/stage1/stream` 是 `text/event-stream`，UI 会等流结束才一次性显示。看逐字效果请用 `curl -N` 或浏览器 `EventSource`。
+2. **对话接口需要真实 Key**。文档本身不依赖 Key（springdoc 只做静态扫描），但应用启动依赖它：`DEEPSEEK_API_KEY` 未设置时 DeepSeek 自动配置的 `Assert.hasText` 会直接让应用起不来。Key 设了但无效时，「Try it out」返回 401 —— 那是模型调用失败，与文档无关。
+3. **Stage 7 默认不出现在文档里**。`McpClientController` 上有 `@ConditionalOnProperty`，`spring.ai.mcp.client.enabled=false` 时 Bean 根本不创建，springdoc 自然也扫不到。要它出现，需改配置并重启。
+4. **`@Schema` 不会改变发给模型的 JSON Schema**。Stage 5 结构化输出时约束模型的是 `BeanOutputConverter` 依 record 结构推导出的 Schema + Prompt 文字，DTO 上的 `@Schema` 只影响 Swagger UI 的展示。
+
+> 顺带一个踩过一次的坑：Swagger UI 会帮你把中文参数 URL 编码，没问题；但用 curl 手敲时如果直接在 URL 里写中文（`?text=测试中文`），Tomcat 10 会因为请求行含非 ASCII 字节直接返回 **400**，与业务代码无关。命令行请用 `--data-urlencode` 或 `%E6%B5%8B…` 形式。
+
+### 验证测试
+
+`src/test/java/com/agentlab/OpenApiDocsTest.java` 会真实发 HTTP 请求校验：
+
+- `/v3/api-docs` 返回 200 且含项目标题、7 个分组、14 条抽查路径
+- `/stage7/**` **不**出现（反向验证条件装配）
+- `/swagger-ui/index.html` 可访问（验证 webjar 静态资源完整）
+
+之所以必须发真实请求：**springdoc 的 OpenAPI 模型是懒生成的**，只有真正有人来取文档那一刻才去扫描 Controller。注解写错、Tag 名对不上这类问题，在「应用能启动」阶段完全看不出来。
+
+---
+
 ## 进阶：把对话记忆落库到 MySQL（持久层 = MyBatis-Plus）
 
 默认的 `ChatMemoryRepository` 是 `InMemoryChatMemoryRepository`，进程一重启记忆就没了。
@@ -356,7 +446,7 @@ curl "http://localhost:8080/stage2/db/conversations"
 
 ```
 spring-ai-agent-lab/
-├── pom.xml                                  # Spring Boot 4.1.1 + Spring AI BOM 2.0.1 + MyBatis-Plus 3.5.17
+├── pom.xml                                  # Spring Boot 4.1.1 + Spring AI BOM 2.0.1 + MyBatis-Plus 3.5.17 + springdoc 3.1.1
 ├── src/main/java/com/agentlab/
 │   ├── AgentLabApplication.java
 │   ├── stage1/BasicChatController.java       # ChatClient 基础
@@ -383,13 +473,16 @@ spring-ai-agent-lab/
 │   │   ├── mapper/ChatMemoryMapper.java      # extends BaseMapper，零 XML
 │   │   ├── repository/MybatisChatMemoryRepository.java  # 实现 ChatMemoryRepository
 │   │   └── config/ChatMemoryPersistenceConfig.java      # 显式装配 ChatMemory
-│   ├── config/WebEncodingConfig.java         # 全局 UTF-8（中文乱码根治）
+│   ├── config/
+│   │   ├── WebEncodingConfig.java            # 全局 UTF-8（中文乱码根治）
+│   │   └── OpenApiConfig.java                # Swagger 元数据 + 分组常量（@Tag 引用它）
 │   └── diagnostics/EncodingDiagnosticController.java  # 编码自检端点
 ├── src/main/resources/
 │   ├── application.yml
 │   └── application-mcp.yml.example
 └── src/test/java/com/agentlab/
     ├── AgentLabApplicationTests.java         # 上下文装配冒烟测试
+    ├── OpenApiDocsTest.java                  # 真实 HTTP 校验 /v3/api-docs 与 Swagger UI
     └── stage3/ToolsTest.java                 # 工具单测
 ```
 

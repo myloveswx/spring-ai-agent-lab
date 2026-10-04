@@ -1,5 +1,11 @@
 package com.agentlab.stage2;
 
+import com.agentlab.config.OpenApiConfig;
+
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
+
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -29,6 +35,7 @@ import java.util.List;
  */
 @RestController
 @RequestMapping("/stage2")
+@Tag(name = OpenApiConfig.TAG_STAGE2)
 public class MemoryChatController {
 
     private final ChatClient chatClient;
@@ -50,8 +57,16 @@ public class MemoryChatController {
      * </pre>
      */
     @GetMapping("/chat")
-    public String chat(@RequestParam String conversationId,
-                       @RequestParam String message) {
+    @Operation(summary = "带记忆的对话",
+            description = "同一个 conversationId 连续调用即可验证「记得住」。"
+                    + "conversationId 是记忆的唯一分区键，必须显式传入 —— "
+                    + "真实系统里应按「用户 ID + 会话 ID」派生，绝不能跨用户复用固定值，"
+                    + "否则 A 用户的对话历史会串进 B 用户的上下文。")
+    public String chat(
+            @Parameter(description = "会话分区键，建议格式「用户ID:会话ID」", example = "u1:demo")
+            @RequestParam String conversationId,
+            @Parameter(description = "用户消息", example = "我叫追光者")
+            @RequestParam String message) {
         return chatClient.prompt()
                 .user(message)
                 .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, conversationId))
@@ -64,7 +79,13 @@ public class MemoryChatController {
      * <pre>curl "http://localhost:8080/stage2/history/size?conversationId=u1:demo"</pre>
      */
     @GetMapping("/history/size")
-    public int historySize(@RequestParam String conversationId) {
+    @Operation(summary = "查看记忆条数（教学用）",
+            description = "返回记忆层当前**保留**的消息条数，不是数据库里的总条数。"
+                    + "MessageWindowChatMemory 默认窗口 20 条，超出部分会被淘汰，"
+                    + "所以这个数字始终 ≤ 数据库里的实际行数。")
+    public int historySize(
+            @Parameter(description = "会话分区键", example = "u1:demo")
+            @RequestParam String conversationId) {
         return chatMemory.get(conversationId).size();
     }
 
@@ -73,7 +94,12 @@ public class MemoryChatController {
      * <pre>curl "http://localhost:8080/stage2/history?conversationId=u1:demo"</pre>
      */
     @GetMapping("/history")
-    public List<String> history(@RequestParam String conversationId) {
+    @Operation(summary = "打印会话消息列表（教学用）",
+            description = "把消息渲染成「USER -> 内容」的字符串数组，方便肉眼确认上下文装配顺序；"
+                    + "受窗口裁剪影响，与数据库内容可能不一致。")
+    public List<String> history(
+            @Parameter(description = "会话分区键", example = "u1:demo")
+            @RequestParam String conversationId) {
         return chatMemory.get(conversationId).stream()
                 .map(m -> m.getMessageType() + " -> " + m.getText())
                 .toList();
@@ -84,7 +110,11 @@ public class MemoryChatController {
      * <pre>curl -X DELETE "http://localhost:8080/stage2/history?conversationId=u1:demo"</pre>
      */
     @DeleteMapping("/history")
-    public String clear(@RequestParam String conversationId) {
+    @Operation(summary = "清空会话记忆",
+            description = "删除该 conversationId 下的全部消息（数据库真实删除，不可撤销）。")
+    public String clear(
+            @Parameter(description = "会话分区键", example = "u1:demo")
+            @RequestParam String conversationId) {
         chatMemory.clear(conversationId);
         return "cleared: " + conversationId;
     }

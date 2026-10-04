@@ -1,7 +1,13 @@
 package com.agentlab.stage5;
 
+import com.agentlab.config.OpenApiConfig;
 import com.agentlab.stage3.tools.MarketTools;
 import com.agentlab.stage5.dto.IndexAnalysis;
+
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
+
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.StructuredOutputValidationAdvisor;
 import org.springframework.ai.chat.model.ChatModel;
@@ -29,6 +35,7 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @RequestMapping("/stage5")
+@Tag(name = OpenApiConfig.TAG_STAGE5)
 public class StructuredOutputController {
 
     private static final String SYSTEM = """
@@ -58,7 +65,14 @@ public class StructuredOutputController {
 
     /** 朴素版：只靠 .entity() 转换。 */
     @GetMapping("/analyze")
-    public IndexAnalysis analyze(@RequestParam String indexCode) {
+    @Operation(summary = "结构化输出（朴素版）",
+            description = "直接 .entity(IndexAnalysis.class)：Spring AI 会把目标类型的 JSON Schema "
+                    + "拼进 Prompt，再把模型回复反序列化成对象。"
+                    + "模型偶发输出 ```json 代码围栏或字段类型不符时，这里会解析失败（500）—— 这正是对照组的意义。")
+    public IndexAnalysis analyze(
+            @Parameter(description = "指数代码，工具只有 000001（上证）/ 399001（深证）/ 399006（创业板）三个有效值",
+                    example = "000001")
+            @RequestParam String indexCode) {
         return plainClient.prompt()
                 .user(u -> u.text(ANALYSIS_PROMPT).param("code", indexCode))
                 .call()
@@ -67,7 +81,13 @@ public class StructuredOutputController {
 
     /** 自纠错版：同样的 Prompt，多挂一个 StructuredOutputValidationAdvisor。 */
     @GetMapping("/analyze/validated")
-    public IndexAnalysis analyzeValidated(@RequestParam String indexCode) {
+    @Operation(summary = "结构化输出（自纠错版）",
+            description = "同样的 Prompt，多挂一个 StructuredOutputValidationAdvisor："
+                    + "解析 / 校验失败时把错误信息回喂给模型重试，最多 2 次。"
+                    + "与 /stage5/analyze 对照调用，能直观看到「多了兜底就稳了」，代价是 Token 与耗时上升。")
+    public IndexAnalysis analyzeValidated(
+            @Parameter(description = "指数代码，可选 000001 / 399001 / 399006", example = "399006")
+            @RequestParam String indexCode) {
         return validatingClient.prompt()
                 .user(u -> u.text(ANALYSIS_PROMPT).param("code", indexCode))
                 .call()

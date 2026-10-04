@@ -1,5 +1,11 @@
 package com.agentlab.stage7;
 
+import com.agentlab.config.OpenApiConfig;
+
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
+
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.mcp.SyncMcpToolCallbackProvider;
@@ -40,6 +46,7 @@ import java.util.List;
 @RestController
 @RequestMapping("/stage7")
 @ConditionalOnProperty(prefix = "spring.ai.mcp.client", name = "enabled", havingValue = "true")
+@Tag(name = OpenApiConfig.TAG_STAGE7)
 public class McpClientController {
 
     private final ChatClient chatClient;
@@ -65,6 +72,10 @@ public class McpClientController {
      * <pre>curl "http://localhost:8080/stage7/tools"</pre>
      */
     @GetMapping("/tools")
+    @Operation(summary = "列出 MCP Server 提供的工具",
+            description = "把从所有 MCP Server 发现到的工具渲染成「名称 —— 描述」。"
+                    + "默认配置下本接口不存在（404），因为 spring.ai.mcp.client.enabled=false，"
+                    + "整个 Controller 都不会被创建。")
     public List<String> listTools() {
         return mcpProviders.stream()
                 .flatMap(provider -> Arrays.stream(provider.getToolCallbacks()))
@@ -78,7 +89,12 @@ public class McpClientController {
      * <pre>curl "http://localhost:8080/stage7/chat?message=列出 D:/workspace 下的文件"</pre>
      */
     @GetMapping("/chat")
-    public String chat(@RequestParam String message) {
+    @Operation(summary = "用自然语言调用 MCP 工具",
+            description = "与 Stage 3/6 用法一致 —— MCP 工具被自动包装成 ToolCallback，"
+                    + "业务侧不需要为「远端工具」写任何适配代码。")
+    public String chat(
+            @Parameter(description = "自然语言指令", example = "列出 D:/workspace 下的文件")
+            @RequestParam String message) {
         return chatClient.prompt()
                 .user(message)
                 .call()

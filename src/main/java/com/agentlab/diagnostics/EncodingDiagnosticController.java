@@ -4,6 +4,12 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import com.agentlab.config.OpenApiConfig;
+
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
+
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -27,6 +33,7 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @RequestMapping("/diagnostics")
+@Tag(name = OpenApiConfig.TAG_DIAGNOSTICS)
 public class EncodingDiagnosticController {
 
     private static final String SAMPLE = "中文编码自检：春眠不觉晓，处处闻啼鸟。";
@@ -35,7 +42,12 @@ public class EncodingDiagnosticController {
      * 返回纯文本 String —— 最容易暴露 ISO-8859-1 默认字符集问题的路径。
      */
     @GetMapping("/encoding/text")
-    public String text(@RequestParam(defaultValue = "你好，世界") String text) {
+    @Operation(summary = "纯文本响应（最易暴露乱码）",
+            description = "返回 text/plain。重点看响应头里的 Content-Type 是否带 charset=UTF-8 —— "
+                    + "没带（或被写成 ISO-8859-1）就会乱码。这是不花 Token 的编码自检通道。")
+    public String text(
+            @Parameter(description = "任意文本，回显在响应里", example = "测试中文")
+            @RequestParam(defaultValue = "你好，世界") String text) {
         return SAMPLE + System.lineSeparator() + "收到参数：" + text;
     }
 
@@ -44,7 +56,12 @@ public class EncodingDiagnosticController {
      * 顺带把运行时的字符集信息一并返回，方便定位问题出在哪一层。
      */
     @GetMapping("/encoding/json")
-    public Map<String, Object> json(@RequestParam(defaultValue = "你好，世界") String text) {
+    @Operation(summary = "JSON 响应 + 运行时字符集信息",
+            description = "走 Jackson（本身默认 UTF-8），用于与上一条对照定位问题出在哪一层；"
+                    + "同时回传 JVM 的 file.encoding 与默认字符集，方便判断是不是运行环境的问题。")
+    public Map<String, Object> json(
+            @Parameter(description = "任意文本，回显在响应的 received 字段", example = "你好，世界")
+            @RequestParam(defaultValue = "你好，世界") String text) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("received", text);
         result.put("sample", SAMPLE);

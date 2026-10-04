@@ -3,6 +3,12 @@ package com.agentlab.stage2;
 import java.util.List;
 import java.util.Map;
 
+import com.agentlab.config.OpenApiConfig;
+
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
+
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -42,6 +48,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
  */
 @RestController
 @RequestMapping("/stage2/db")
+@Tag(name = OpenApiConfig.TAG_STAGE2)
 public class MemoryDbInspector {
 
     private static final String TABLE = "SPRING_AI_CHAT_MEMORY";
@@ -62,7 +69,16 @@ public class MemoryDbInspector {
      * 而不是默认的 {@code InMemoryChatMemoryRepository}。
      */
     @PostMapping("/seed")
-    public String seed(@RequestParam String conversationId, @RequestParam String text) {
+    @Operation(summary = "写入一对消息（不经过大模型）",
+            description = "直接往 ChatMemory 里 add 一条 USER + 一条 ASSISTANT，"
+                    + "刻意不调用模型 —— 如果这样写完之后数据库里能查到，"
+                    + "就证明注入的 ChatMemory 底层确实是 MySQL，而不是默认的内存实现。")
+    public String seed(
+            @Parameter(description = "会话分区键", example = "demo:db")
+            @RequestParam String conversationId,
+            @Parameter(description = "写入的消息文本（可含中文，用于顺带验证落库编码）",
+                    example = "你好，中文落库验证")
+            @RequestParam String text) {
         chatMemory.add(conversationId, new UserMessage(text));
         chatMemory.add(conversationId, new AssistantMessage("[seed] 已收到：" + text));
         return "seeded 2 messages into conversation: " + conversationId;
@@ -75,7 +91,13 @@ public class MemoryDbInspector {
      * 下划线列名 {@code conversation_id} 自动落到驼峰属性 {@code conversationId}。
      */
     @GetMapping("/rows")
-    public List<ChatMemoryEntity> rows(@RequestParam String conversationId) {
+    @Operation(summary = "查询某会话的全部消息行",
+            description = "按 sequence_id 升序返回，**不受窗口裁剪影响** —— "
+                    + "这是与 /stage2/history 的关键区别：后者看到的是记忆层认为该保留的，"
+                    + "这里看到的是数据库里实际存的。")
+    public List<ChatMemoryEntity> rows(
+            @Parameter(description = "会话分区键", example = "demo:db")
+            @RequestParam String conversationId) {
         return chatMemoryMapper.selectList(
                 Wrappers.<ChatMemoryEntity>lambdaQuery()
                         .eq(ChatMemoryEntity::getConversationId, conversationId)
@@ -84,12 +106,17 @@ public class MemoryDbInspector {
 
     /** 全库会话概览：每个会话多少条、最后写入时间。 */
     @GetMapping("/conversations")
+    @Operation(summary = "全库会话概览",
+            description = "每个会话的条数与最后写入时间，用于确认记忆分区是否符合预期。")
     public List<Map<String, Object>> conversations() {
         return chatMemoryMapper.selectConversationSummaries();
     }
 
     /** 表级统计 + 确认库名与字符集。 */
     @GetMapping("/stats")
+    @Operation(summary = "表级统计与库信息",
+            description = "顺带回传当前连接的库名与字符集 —— 排查中文乱码时，"
+                    + "先确认服务端看到的 charset 是 utf8mb4 还是别的。")
     public Map<String, Object> stats() {
         Long total = chatMemoryMapper.selectCount(Wrappers.emptyWrapper());
         String db = chatMemoryMapper.selectCurrentDatabase();

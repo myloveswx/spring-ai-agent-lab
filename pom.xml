@@ -25,6 +25,13 @@
              在 Spring Boot 4（Spring Framework 7）下会因 starter 元数据与
              自动配置条件不匹配而装配失败。 -->
         <mybatis-plus.version>3.5.17</mybatis-plus.version>
+        <!-- Swagger / OpenAPI 文档。
+             springdoc-openapi 的版本线是跟着 Spring Boot 大版本走的：
+               2.8.x → Spring Boot 3.x
+               3.x   → Spring Boot 4.x（官方 pom 的 parent 就是 spring-boot-starter-parent 4.1.0）
+             所以在 Boot 4.1.1 上必须用 3.x，用 2.8.x 会在自动配置阶段直接报
+             NoClassDefFoundError / 条件注解不匹配。 -->
+        <springdoc.version>3.1.1</springdoc.version>
         <!-- 编码三层统一：源码 / 编译产物 / 报告输出全部 UTF-8。
              Windows 平台默认编码常为 GBK，若不显式声明，
              源码里的中文注释与字符串会在编译期就被破坏（第三层）。 -->
@@ -49,6 +56,22 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- Swagger / OpenAPI 3 接口文档（UI 版：自带 Swagger UI 静态资源）
+             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+             artifactId 里的 webmvc 是关键：
+               - springdoc-openapi-starter-webmvc-ui  → Spring MVC（servlet），本项目用这个
+               - springdoc-openapi-starter-webflux-ui → WebFlux（响应式），本项目不用
+             这个 starter 会带来三样东西：
+               1) springdoc 的自动配置（扫描 @RestController，生成 OpenAPI 模型）
+               2) swagger-core-jakarta（注解 @Tag/@Operation/@Schema 与模型类）
+               3) webjars 形式的 Swagger UI（/swagger-ui/index.html）
+             探针端点：/v3/api-docs（OpenAPI JSON）、/swagger-ui/index.html（可视化界面） -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>${springdoc.version}</version>
         </dependency>
 
         <!-- Stage 1-3：DeepSeek 对话模型（OpenAI 兼容协议） -->

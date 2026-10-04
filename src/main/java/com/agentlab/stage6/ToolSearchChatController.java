@@ -1,6 +1,12 @@
 package com.agentlab.stage6;
 
+import com.agentlab.config.OpenApiConfig;
 import com.agentlab.stage6.tools.CrmTools;
+
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
+
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -29,6 +35,7 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @RequestMapping("/stage6")
+@Tag(name = OpenApiConfig.TAG_STAGE6)
 public class ToolSearchChatController {
 
     private final ChatClient chatClient;
@@ -53,7 +60,16 @@ public class ToolSearchChatController {
      * </pre>
      */
     @GetMapping("/chat")
-    public String chat(@RequestParam String message) {
+    @Operation(summary = "多工具场景（渐进式披露）",
+            description = "本阶段注册了 CRM 的全部 12 个工具。"
+                    + "ToolSearchToolCallingAdvisor 会先把问题与工具描述做匹配，"
+                    + "每轮只把最相关的少数几个下发给模型，而不是一次性把 12 个全塞进 Prompt。"
+                    + "对照实验：把 spring.ai.chat.client.tool-search-advisor.enabled 改成 false 重启，"
+                    + "再问同样的问题，控制台里下发的工具数量会有明显差别。")
+    public String chat(
+            @Parameter(description = "客服类自然语言提问",
+                    example = "帮 C1001 查一下最近的订单、物流、发票状态和账户余额")
+            @RequestParam String message) {
         return chatClient.prompt()
                 .user(message)
                 .call()

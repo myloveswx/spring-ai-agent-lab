@@ -41,10 +41,15 @@ spring:
       #   Windows PowerShell :  $env:DEEPSEEK_API_KEY="sk-xxxx"
       #   Windows CMD        :  set DEEPSEEK_API_KEY=sk-xxxx
       #   macOS / Linux      :  export DEEPSEEK_API_KEY=sk-xxxx
-      # 冒号后的空值兜底：未设置环境变量时不会启动失败，而是调用时报 401
       #
       # !!! 请勿把真实 Key 明文写在这里 !!!
       # application.yml 在 git 跟踪范围内，一旦 push 到 GitHub 就等于公开泄露。
+      #
+      # ⚠️ 空值不会「优雅降级」：DeepSeekChatAutoConfiguration 里对 api-key 做了
+      #    Assert.hasText 校验，未设置环境变量时 ChatModel Bean 创建失败，
+      #    应用**直接启动不起来**（报 DeepSeek API key must be set），
+      #    而不是启动成功、调用时才报 401。所以跑本项目前必须先设好这个变量。
+      #    测试类里用假 Key 覆盖，因此 mvn test 不需要真 Key。
       api-key: ${DEEPSEEK_API_KEY:}
       chat:
         # 可选值：deepseek-chat / deepseek-reasoner
@@ -99,6 +104,38 @@ mybatis-plus:
   global-config:
     # 关掉 MyBatis-Plus 启动时那行 ASCII art banner
     banner: false
+
+# =====================================================================
+# Swagger / OpenAPI 文档（springdoc-openapi 3.1.1）
+#   可视化界面 : http://localhost:8080/swagger-ui/index.html
+#   OpenAPI JSON: http://localhost:8080/v3/api-docs
+#   说明        : 由 com.agentlab.config.OpenApiConfig 提供元数据
+# =====================================================================
+springdoc:
+  # 扫描范围：限定在项目包下，避免把 Spring 内部 / 第三方 Controller 也扫进来。
+  # 不配的话默认扫描整个 classpath，Actuator 等端点会一起混进文档里。
+  packages-to-scan: com.agentlab
+  api-docs:
+    enabled: true
+    path: /v3/api-docs
+    # 显式声明 OpenAPI 版本，否则部分客户端（如 Postman 导入）会按 3.0.1 兜底
+    version: OPENAPI_3_1
+  swagger-ui:
+    enabled: true
+    path: /swagger-ui.html
+    # 接口列表按 Tag 名排序。本项目 Tag 形如「Stage 1 · ...」～「Stage 7 · ...」，
+    # 数字在前且位数相同，所以 alpha 排出来正好是 1→7；中文 Tag 会排在 ASCII 之后。
+    # 注意：一旦出现两位数（Stage 10），alpha 会把它排到 Stage 2 前面，
+    # 那时应改用 OpenApiConfig 里声明 tags 的插入顺序（去掉本项）。
+    tags-sorter: alpha
+    # 同一 Tag 内的方法按 HTTP 语义排序：GET 在前，POST/DELETE 在后
+    operations-sorter: method
+    # 接口列表默认全展开，减少点击次数
+    doc-expansion: list
+    # 顶部显示请求耗时 —— 能直观看到「带工具循环的接口就是慢」
+    display-request-duration: true
+    # 浏览器关闭页面后不残留授权信息（本项目无鉴权，保持 false）
+    persist-authorization: false
 
 logging:
   level:

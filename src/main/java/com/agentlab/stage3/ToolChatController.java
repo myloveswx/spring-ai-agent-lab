@@ -1,7 +1,13 @@
 package com.agentlab.stage3;
 
+import com.agentlab.config.OpenApiConfig;
 import com.agentlab.stage3.tools.MarketTools;
 import com.agentlab.stage3.tools.TimeTools;
+
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
+
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor;
 import org.springframework.ai.chat.model.ChatModel;
@@ -30,6 +36,7 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @RequestMapping("/stage3")
+@Tag(name = OpenApiConfig.TAG_STAGE3)
 public class ToolChatController {
 
     private final ChatClient chatClient;
@@ -60,7 +67,14 @@ public class ToolChatController {
      * </pre>
      */
     @GetMapping("/chat")
-    public String chat(@RequestParam String message) {
+    @Operation(summary = "带工具调用的对话",
+            description = "模型自行决定是否调用工具，并可能连续调用多个。"
+                    + "提问涉及「时间 / 日期推算 / 指数行情」时才会触发工具；"
+                    + "闲聊类问题不触发，会明显更快。想看工具往返细节请打开控制台日志。")
+    public String chat(
+            @Parameter(description = "用户提问，例：「现在几点？」「上证指数和创业板指现在多少点，哪个涨得多？」",
+                    example = "查一下上证指数和创业板指现在多少点，哪个涨得多？")
+            @RequestParam String message) {
         return chatClient.prompt()
                 .user(message)
                 .call()
