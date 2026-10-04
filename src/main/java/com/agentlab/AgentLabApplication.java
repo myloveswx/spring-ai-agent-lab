@@ -16,6 +16,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  *   <li>Stage 5 {@code /stage5/**} —— 结构化输出与自纠错</li>
  *   <li>Stage 6 {@code /stage6/**} —— 多工具场景与渐进式工具披露</li>
  *   <li>Stage 7 {@code /stage7/**} —— MCP 客户端接入（进阶）</li>
+ *   Swagger UI	http://localhost:8080/swagger-ui/index.html
  * </ul>
  *
  * <p>持久层：MyBatis-Plus（{@code com.agentlab.persistence}）。
