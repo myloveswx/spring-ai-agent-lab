@@ -1,0 +1,63 @@
+# ============================================================================
+# Stage 7：MCP 客户端示例配置
+#
+# 用法：把本文件复制为 application-mcp.yml，然后以下面的方式启动：
+#   mvn spring-boot:run -Dspring-boot.run.profiles=mcp
+# 或者：
+#   java -jar target/spring-ai-agent-lab-1.0.0.jar --spring.profiles.active=mcp
+#
+# 注意：Spring Boot 只有加载到名为 application-<profile>.yml 的文件才会生效，
+# 所以要先把本文件改名为 application-mcp.yml。
+# ============================================================================
+
+spring:
+  ai:
+    mcp:
+      client:
+        # 关键开关：打开后 McpClientController 才会被装配
+        enabled: true
+        name: agent-lab-mcp-client
+        version: 1.0.0
+        # SYNC（同步）或 ASYNC（异步）
+        type: SYNC
+        request-timeout: 30s
+        # 自动把 MCP 工具注册成 ToolCallback Bean，可被全局发现
+        toolcallback:
+          enabled: true
+
+        # ------------------------------------------------------------------
+        # 方式一（推荐入门）：STDIO —— 以子进程方式拉起本地 MCP Server
+        #
+        # 官方 filesystem server 通过 npx 启动。国内网络建议先切换 npm 镜像：
+        #   npm config set registry https://registry.npmmirror.com
+        # 把下面的 allowed-dir 换成你自己的目录。
+        # ------------------------------------------------------------------
+        stdio:
+          connections:
+            filesystem:
+              command: npx
+              args:
+                - "-y"
+                - "@modelcontextprotocol/server-filesystem"
+                - "D:/workspace"
+              # 国内网络可显式指定镜像源，避免 registry.npmjs.org 不通
+              env:
+                npm_config_registry: "https://registry.npmmirror.com"
+
+        # ------------------------------------------------------------------
+        # 方式二：Streamable HTTP —— 连接远端 / 已独立部署的 MCP Server
+        # （Spring AI 2.0 已把 Streamable HTTP 作为默认传输，SSE 传输被弃用）
+        # ------------------------------------------------------------------
+        # streamable-http:
+        #   connections:
+        #     my-remote-server:
+        #       url: http://localhost:3001
+        #       endpoint: /mcp
+        #       # 如需鉴权，可加 headers（例如 OAuth2 / API-Key）
+        #       # headers:
+        #       #   Authorization: "Bearer <your-token>"
+
+logging:
+  level:
+    io.modelcontextprotocol: INFO
+    org.springframework.ai.mcp: DEBUG
