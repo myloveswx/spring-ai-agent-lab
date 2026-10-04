@@ -586,8 +586,10 @@ mvn org.openrewrite.maven:org.openrewrite.maven:rewrite-maven-plugin:run \
 
 ## 上传到你的 GitHub
 
-> 本仓库已配置好远程：`origin = git@github.com:zhuiguangzhe/spring-ai-agent-lab.git`，分支 `main`。
+> 本仓库的远程已经配好：`origin = git@github.com:myloveswx/spring-ai-agent-lab.git`，分支 `main` 已绑定上游。
 > 换到别的账号请先 `git remote set-url origin <新地址>`。
+>
+> 仓库地址：https://github.com/myloveswx/spring-ai-agent-lab
 
 ### 为什么用 SSH 而不是 HTTPS
 
