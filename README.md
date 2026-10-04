@@ -236,15 +236,133 @@ curl "http://localhost:8080/stage7/chat?message=列出 D:/workspace 下的文件
 
 ---
 
+## 进阶：把对话记忆落库到 MySQL（持久层 = MyBatis-Plus）
+
+默认的 `ChatMemoryRepository` 是 `InMemoryChatMemoryRepository`，进程一重启记忆就没了。
+本项目已改为 **MyBatis-Plus 持久化**，落到本机 MySQL 8.0.28。
+
+### 为什么换持久层可以不动业务代码
+
+Spring AI 把「记忆」拆成两个正交抽象：
+
+| 抽象 | 职责 |
+|---|---|
+| `ChatMemory` | **决策层** —— 保留哪些消息、窗口多大（默认 `MessageWindowChatMemory`，窗口 20 条） |
+| `ChatMemoryRepository` | **存储层** —— 只管存取，不关心业务 |
+
+换持久化框架只需要换后者。`MemoryChatController` 始终只依赖 `ChatMemory` 接口，
+**一行都没改** —— 这正是这个抽象存在的意义。
+
+### 改了什么
+
+| 层 | 内容 |
+|---|---|
+| 依赖 | 引入 `mybatis-plus-spring-boot4-starter:3.5.17`；**移除** `spring-ai-starter-model-chat-memory-repository-jdbc` |
+| 实体 | `persistence/entity/ChatMemoryEntity.java` —— `@TableName("SPRING_AI_CHAT_MEMORY")` |
+| Mapper | `persistence/mapper/ChatMemoryMapper.java` —— `extends BaseMapper`，零 XML |
+| 仓储 | `persistence/repository/MybatisChatMemoryRepository.java` —— 实现 `ChatMemoryRepository` |
+| 装配 | `persistence/config/ChatMemoryPersistenceConfig.java` —— 显式声明 `ChatMemory` Bean |
+| 业务 | `stage2/MemoryChatController.java` —— **零改动** |
+
+> 移除官方 starter 的连带影响：它原本顺带带来 `spring-ai-autoconfigure-model-chat-memory`
+> （提供 `ChatMemory` 自动装配）。少一个 starter 就少一个自动配置，所以我们在
+> `ChatMemoryPersistenceConfig` 里手工声明 `ChatMemory`。显式的装配链比隐式的更容易学。
+
+### 必须对齐官方实现的三处语义
+
+这三条不对齐就会出问题，且症状都不直观：
+
+1. **`saveAll` 是「全量覆盖」，不是「追加」**
+   `MessageWindowChatMemory` 每次 `add` 后，会把**整个窗口**的消息交给 `saveAll`。
+   若做成增量插入，每轮对话都会把旧消息重复写一遍，表会指数级膨胀。
+   正确做法：**同一事务内**先删该会话全部行，再批量插入。
+
+2. **tool 消息不落库**
+   `ToolResponseMessage` 和带 `toolCalls` 的 `AssistantMessage` 无法用「单个 content 列」表达。
+   官方实现直接过滤 + 打告警，这里保持一致 —— 否则要么插入失败（content 为 NULL），
+   要么丢失工具调用结构。
+
+3. **`type` 列必须写 `MessageType#name()`，不能写 `getValue()`**
+   这是最阴的一个坑：`MessageType.USER.name()` 是 **`USER`**，
+   而 `MessageType.USER.getValue()` 是 **`user`**（小写）。
+   数据库 ENUM 定义是 `('USER','ASSISTANT','SYSTEM','TOOL')`，写小写会直接插入失败。
+
+### 三个 MyBatis-Plus 适配坑
+
+1. **官方表结构没有主键**（只有两个组合索引）→ 实体里**不能**声明 `@TableId`，
+   也就用不了 `selectById / updateById / deleteById` 这一族方法。
+   好在 `ChatMemoryRepository` 的四个方法本来就以 `conversation_id` 为条件，
+   用 `Wrapper` 完全够用。这里刻意**不改表结构**，好处是随时能切回官方实现。
+2. **`type` 与 `timestamp` 是 SQL 关键字** → 必须用 `` @TableField("`type`") `` 反引号包住，
+   否则拼出来的 SQL 在 MySQL 上语法报错。
+3. **Spring Boot 4 必须用 `mybatis-plus-spring-boot4-starter`**，不是 `spring-boot3-starter`；
+   版本 ≥ 3.5.13 才有这个 artifact（它依赖 `mybatis-spring:4.0.0`，适配 Spring Framework 7）。
+
+### 表结构
+
+`agent_lab.SPRING_AI_CHAT_MEMORY`，沿用 Spring AI 官方定义
+（见 `../mysql-setup/schema/agent-memory.sql`），**未做任何 DDL 变更**。
+
+### 验证落库（不需要 API Key、不联网）
+
+```bash
+# 0. 先启动 MySQL：D:\workspace\mysql-setup\2-start-mysql.cmd
+
+# 1. 不经过大模型，直接往记忆里写两条（POST 表单体；中文需 URL 编码）
+curl -X POST -d "conversationId=verify:mp&text=%E4%BD%A0%E5%A5%BD" \
+     "http://localhost:8080/stage2/db/seed"
+
+# 2. 直查数据库 —— 查得到就证明底层确实是 MySQL 存储
+curl "http://localhost:8080/stage2/db/rows?conversationId=verify:mp"
+# [{"conversationId":"verify:mp","content":"你好","type":"USER","sequenceId":0},
+#  {"conversationId":"verify:mp","content":"[seed] 已收到：你好","type":"ASSISTANT","sequenceId":1}]
+
+# 3. 统计 / 会话概览（stats 会回显当前持久层实现）
+curl "http://localhost:8080/stage2/db/stats"
+# {"persistence":"MyBatis-Plus (MybatisChatMemoryRepository)","charset":"utf8mb4", ...}
+curl "http://localhost:8080/stage2/db/conversations"
+```
+
+> **为什么 seed 两次仍是 4 条？** 这正是上面「全量覆盖」语义的可见证据：
+> 第 2 次 seed 时窗口是 `[U1,A1,U2,A2]`，`saveAll` 先删掉旧的 2 条再写入 4 条。
+> 若实现成追加，这里会是 6 条甚至更多。
+>
+> 想看 MyBatis 实际执行的 SQL：`application.yml` 里 `log-impl` 已设为 `StdOutImpl`，
+> 控制台会打印 `Preparing:` 与 `Parameters:` 两行。上面那次写入会看到：
+> ```sql
+> DELETE FROM SPRING_AI_CHAT_MEMORY WHERE (conversation_id = ?)
+> INSERT INTO SPRING_AI_CHAT_MEMORY ( conversation_id, content, `type`, `timestamp`, sequence_id ) VALUES ( ?, ?, ?, ?, ? )
+> ```
+
+> 为什么不用 `ChatMemory#get()` 验证：那条路径会经过 `MessageWindowChatMemory`
+> 的窗口裁剪（默认只保留最近 20 条），你看到的是「记忆层认为该保留的」，
+> 而不是「数据库里实际存的」。确认落库效果必须绕开记忆层直查表。
+
+### 数据库信息
+
+| 项 | 值 |
+|---|---|
+| 地址 | `127.0.0.1:3306` |
+| 账号 | `root` / `123456` |
+| 库 | `agent_lab` |
+| 表 | `SPRING_AI_CHAT_MEMORY` |
+| 字符集 | `utf8mb4` / `utf8mb4_0900_ai_ci` |
+
+数据库的安装、启停与卸载步骤见 `D:\workspace\mysql-setup\README.md`。
+
+---
+
 ## 项目结构
 
 ```
 spring-ai-agent-lab/
-├── pom.xml                                  # Spring Boot 4.1.1 + Spring AI BOM 2.0.1
+├── pom.xml                                  # Spring Boot 4.1.1 + Spring AI BOM 2.0.1 + MyBatis-Plus 3.5.17
 ├── src/main/java/com/agentlab/
 │   ├── AgentLabApplication.java
 │   ├── stage1/BasicChatController.java       # ChatClient 基础
-│   ├── stage2/MemoryChatController.java      # 会话记忆
+│   ├── stage2/                               # 会话记忆
+│   │   ├── MemoryChatController.java         # ChatMemory + MessageChatMemoryAdvisor（换持久层时零改动）
+│   │   └── MemoryDbInspector.java            # 直查 MySQL，验证落库（走 Mapper）
 │   ├── stage3/                               # 工具调用
 │   │   ├── ToolChatController.java
 │   │   ├── config/Stage3ToolConfig.java
@@ -259,7 +377,14 @@ spring-ai-agent-lab/
 │   │   ├── ToolSearchChatController.java
 │   │   ├── config/Stage6ToolConfig.java
 │   │   └── tools/CrmTools.java
-│   └── stage7/McpClientController.java       # MCP 客户端（条件装配）
+│   ├── stage7/McpClientController.java       # MCP 客户端（条件装配）
+│   ├── persistence/                          # 持久层（MyBatis-Plus）
+│   │   ├── entity/ChatMemoryEntity.java      # @TableName 映射（无主键、关键字列名转义）
+│   │   ├── mapper/ChatMemoryMapper.java      # extends BaseMapper，零 XML
+│   │   ├── repository/MybatisChatMemoryRepository.java  # 实现 ChatMemoryRepository
+│   │   └── config/ChatMemoryPersistenceConfig.java      # 显式装配 ChatMemory
+│   ├── config/WebEncodingConfig.java         # 全局 UTF-8（中文乱码根治）
+│   └── diagnostics/EncodingDiagnosticController.java  # 编码自检端点
 ├── src/main/resources/
 │   ├── application.yml
 │   └── application-mcp.yml.example
@@ -267,6 +392,80 @@ spring-ai-agent-lab/
     ├── AgentLabApplicationTests.java         # 上下文装配冒烟测试
     └── stage3/ToolsTest.java                 # 工具单测
 ```
+
+---
+
+## 中文乱码排查手册
+
+接口返回中文乱码，绝大多数是下面三层里的一层出了问题，**按顺序查可一次定位**。
+
+### 三层编码（本项目均已显式声明）
+
+| 层 | 生效位置 | 本项目做法 |
+|---|---|---|
+| ① 请求 / 响应 | Servlet 容器 | `server.servlet.encoding.force: true`（`application.yml`） |
+| ② 消息转换器 | Spring MVC | `StringHttpMessageConverter.setDefaultCharset(UTF_8)`（`WebEncodingConfig`） |
+| ③ 编译期 | javac | `project.build.sourceEncoding` + `maven-compiler-plugin/encoding`（`pom.xml`） |
+
+### 根因：StringHttpMessageConverter 默认是 ISO-8859-1
+
+Spring MVC 的 `StringHttpMessageConverter` 默认字符集是 **ISO-8859-1**（单字节），不是 UTF-8。
+只要 Controller 直接 `return String`，响应头就会写成 `text/plain;charset=ISO-8859-1`，中文必然乱码。
+
+> 为什么返回 JSON 的接口往往没事？因为走的是 Jackson，它默认就是 UTF-8。
+> 所以乱码通常只在「返回纯文本 `String`」的接口上暴露 —— 这也是它容易被忽略的原因。
+
+修复要点是**改默认字符集，而不是换掉转换器列表**：
+
+```java
+@Configuration
+public class WebEncodingConfig implements WebMvcConfigurer {
+    @Override
+    public void extendMessageConverters(List<HttpMessageConverter<?>> converters) {
+        converters.stream()
+                .filter(StringHttpMessageConverter.class::isInstance)
+                .map(StringHttpMessageConverter.class::cast)
+                .forEach(c -> c.setDefaultCharset(StandardCharsets.UTF_8));
+    }
+}
+```
+
+⚠️ 用 `extendMessageConverters`（在默认列表上增删改），**不要**用 `configureMessageConverters`（整体替换），
+后者会把 Jackson 等默认转换器一并清空 —— 这是高频踩坑点。
+
+### 一键自检（不需要 API Key、不联网）
+
+```bash
+# ① 看响应头有没有 charset=UTF-8
+curl -s -D - "http://localhost:8080/diagnostics/encoding/text" -o /dev/null | grep -i content-type
+
+# ② 看运行时的 JVM 字符集
+curl -s "http://localhost:8080/diagnostics/encoding/json"
+```
+
+正常输出：
+
+```
+Content-Type: text/plain;charset=UTF-8
+{"received":"你好，世界","expectedCharset":"UTF-8","jvmFileEncoding":"UTF-8","jvmDefaultCharset":"UTF-8"}
+```
+
+### 如果服务端正常、终端里仍显示乱码
+
+那问题在**客户端**，与服务端无关：
+
+| 环境 | 处理方式 |
+|---|---|
+| Windows CMD | 先 `chcp 65001` 切到 UTF-8 代码页，再执行 curl |
+| Windows PowerShell | `[Console]::OutputEncoding=[Text.Encoding]::UTF8`；且要用 `curl.exe`，别用 `curl`（那是 `Invoke-WebRequest` 的别名，编码行为不同） |
+| Git Bash | 默认 UTF-8，一般无需处理 |
+| IDEA 控制台 | Settings → Editor → File Encodings 全设 UTF-8；Run Configuration 加 VM 参数 `-Dfile.encoding=UTF-8` |
+
+### 判断口诀
+
+- 响应头带 `charset=UTF-8`、字节也是 UTF-8，**但屏幕仍乱** → 客户端显示问题，改终端
+- 响应头是 `ISO-8859-1` → 第 ①② 层没配好
+- 中文变成 `?` 或只有部分字乱 → 编译期编码问题（第 ③ 层），检查 pom 的 `sourceEncoding`
 
 ---
 

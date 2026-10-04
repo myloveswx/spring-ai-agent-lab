@@ -20,7 +20,16 @@
     <properties>
         <java.version>21</java.version>
         <spring-ai.version>2.0.1</spring-ai.version>
+        <!-- MyBatis-Plus：必须用 spring-boot4-* 这个 artifact。
+             3.5.12 及以前的 spring-boot3-starter 依赖 spring-boot 3.x，
+             在 Spring Boot 4（Spring Framework 7）下会因 starter 元数据与
+             自动配置条件不匹配而装配失败。 -->
+        <mybatis-plus.version>3.5.17</mybatis-plus.version>
+        <!-- 编码三层统一：源码 / 编译产物 / 报告输出全部 UTF-8。
+             Windows 平台默认编码常为 GBK，若不显式声明，
+             源码里的中文注释与字符串会在编译期就被破坏（第三层）。 -->
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     </properties>
 
     <dependencies>
@@ -60,6 +69,31 @@
             <artifactId>spring-ai-starter-mcp-client</artifactId>
         </dependency>
 
+        <!-- Stage 2 进阶：持久层改用 MyBatis-Plus
+             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+             注意这里**故意不再引入** spring-ai-starter-model-chat-memory-repository-jdbc。
+             那个 starter 会带来两块东西：
+               1) spring-ai-autoconfigure-model-chat-memory  → ChatMemory 自动装配
+               2) spring-ai-autoconfigure-model-chat-memory-repository-jdbc
+                                                             → JdbcChatMemoryRepository
+             我们只保留第 1 块的等价能力（自己声明 ChatMemory Bean），
+             第 2 块改由 com.agentlab.persistence 下的 MyBatis-Plus 实现提供。
+
+             mybatis-plus-spring-boot4-starter 自带 spring-boot-starter-jdbc，
+             所以 DataSource / 事务管理器 / JdbcTemplate 依然可用。 -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot4-starter</artifactId>
+            <version>${mybatis-plus.version}</version>
+        </dependency>
+
+        <!-- MySQL 驱动（版本由 Spring Boot BOM 统一管理，无需写 version） -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
         <!-- 测试 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -82,6 +116,15 @@
 
     <build>
         <plugins>
+            <!-- 编译期显式指定 UTF-8，不依赖平台默认值（Windows 默认可能是 GBK） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <encoding>UTF-8</encoding>
+                </configuration>
+            </plugin>
+
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

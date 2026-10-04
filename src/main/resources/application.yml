@@ -1,9 +1,35 @@
 server:
   port: 8080
+  # ===================================================================
+  # 全局字符编码 —— 根治接口中文乱码（第一层）
+  # ===================================================================
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      # force=true：强制「请求参数」与「响应」都按上面的 charset 处理。
+      # 默认 false 时，POST 表单、URL 查询参数在某些容器/场景下仍可能
+      # 按 ISO-8859-1 解析，导致中文参数进来就是乱码。
+      force: true
 
 spring:
   application:
     name: spring-ai-agent-lab
+
+  # ===================================================================
+  # 数据源：Agent 会话记忆落库到本机 MySQL 8.0.28
+  #   库 / 表 由 mysql-setup/schema/agent-memory.sql 创建
+  #   启动数据库：D:\workspace\mysql-setup\2-start-mysql.cmd
+  # ===================================================================
+  datasource:
+    url: jdbc:mysql://127.0.0.1:3306/agent_lab?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      pool-name: agent-lab-pool
+      maximum-pool-size: 10
+      connection-timeout: 5000
 
   ai:
     # ===================================================================
@@ -11,9 +37,14 @@ spring:
     # ===================================================================
     deepseek:
       # API Key 从环境变量读取，绝不写死在代码或配置文件里
+      # （明文写在 yml 里会被 git 跟踪，push 即泄露）
       #   Windows PowerShell :  $env:DEEPSEEK_API_KEY="sk-xxxx"
       #   Windows CMD        :  set DEEPSEEK_API_KEY=sk-xxxx
       #   macOS / Linux      :  export DEEPSEEK_API_KEY=sk-xxxx
+      # 冒号后的空值兜底：未设置环境变量时不会启动失败，而是调用时报 401
+      #
+      # !!! 请勿把真实 Key 明文写在这里 !!!
+      # application.yml 在 git 跟踪范围内，一旦 push 到 GitHub 就等于公开泄露。
       api-key: ${DEEPSEEK_API_KEY:}
       chat:
         # 可选值：deepseek-chat / deepseek-reasoner
@@ -37,6 +68,12 @@ spring:
           # regex（默认，零额外依赖）/ lucene / vector
           tool-index-type: regex
 
+    # 注意：这里已不再有 spring.ai.chat.memory.repository.jdbc 段落。
+    # 持久层换成 MyBatis-Plus 后，ChatMemoryRepository 由
+    # com.agentlab.persistence.repository.MybatisChatMemoryRepository 提供，
+    # ChatMemory（MessageWindowChatMemory）由 ChatMemoryPersistenceConfig 声明，
+    # 官方那套 JDBC 自动配置连同它的配置项一起退场。
+
     # ===================================================================
     # Stage 7：MCP 客户端，默认关闭
     # 需要体验时把 enabled 改成 true，或使用 mcp profile：
@@ -46,6 +83,22 @@ spring:
     mcp:
       client:
         enabled: false
+
+# =====================================================================
+# 持久层：MyBatis-Plus（Stage 2 记忆落库）
+#   Mapper 接口：com.agentlab.persistence.mapper.ChatMemoryMapper
+#   由启动类上的 @MapperScan 扫描注册，无需逐个写 @Mapper
+# =====================================================================
+mybatis-plus:
+  configuration:
+    # 下划线列名（conversation_id）自动映射到驼峰属性（conversationId）
+    map-underscore-to-camel-case: true
+    # 打印执行的 SQL 与参数，学习阶段非常有用（会输出到控制台）。
+    # 觉得吵就换成 org.apache.ibatis.logging.nologging.NoLoggingImpl 关闭。
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    # 关掉 MyBatis-Plus 启动时那行 ASCII art banner
+    banner: false
 
 logging:
   level:

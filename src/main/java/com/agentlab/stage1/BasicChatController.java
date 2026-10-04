@@ -69,7 +69,7 @@ public class BasicChatController {
      * 流式输出（Server-Sent Events）。浏览器/前端可逐字渲染。
      * <pre>curl -N "http://localhost:8080/stage1/stream?message=写一首关于编译器的五言绝句"</pre>
      */
-    @GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE + ";charset=UTF-8")
     public Flux<String> stream(@RequestParam String message) {
         return chatClient.prompt()
                 .user(message)
