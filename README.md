@@ -586,27 +586,88 @@ mvn org.openrewrite.maven:org.openrewrite.maven:rewrite-maven-plugin:run \
 
 ## 上传到你的 GitHub
 
+> 本仓库已配置好远程：`origin = git@github.com:zhuiguangzhe/spring-ai-agent-lab.git`，分支 `main`。
+> 换到别的账号请先 `git remote set-url origin <新地址>`。
+
+### 为什么用 SSH 而不是 HTTPS
+
+HTTPS 每次都要处理凭据：GitHub 早已取消密码认证，要么手动生成 Personal Access Token、
+要么依赖凭据管理器弹窗。**SSH 配一次，之后永久免密，也永远不会把令牌写进 `.git/config` 里。**
+
+### 一次性配置（每台机器只需做一次）
+
 ```bash
-# 0. 先确认 git 身份（提交记录的作者信息）
-git config --local user.name  "你的GitHub用户名"
-git config --local user.email "你的GitHub邮箱"
+# 1. 生成密钥对（ed25519，GitHub 当前推荐的算法）
+#    -f 指定文件名，-N "" 表示不设密码短语（设了的话每次 push 要输，可用 ssh-agent 缓存）
+ssh-keygen -t ed25519 -C "你的GitHub邮箱" -f ~/.ssh/id_ed25519 -N ""
 
-# 1. 在 GitHub 网页上新建一个空仓库，例如 spring-ai-agent-lab
-#    注意：不要勾选 "Add a README / .gitignore / license"，保持空仓库
+# 2. 把公钥复制到剪贴板（Windows）
+cat ~/.ssh/id_ed25519.pub | clip
 
-# 2. 关联远程仓库（把 <你的用户名> 换成实际值）
-git remote add origin https://github.com/<你的用户名>/spring-ai-agent-lab.git
+# 3. 粘贴到 GitHub：
+#    https://github.com/settings/ssh/new
+#    Title 随便写（如 "Windows-工作机"），Key 类型保持 Authentication Key，粘贴 → Add SSH key
 
-# 3. 推送
+# 4. 验证（看到 "Hi <用户名>! You've successfully authenticated" 就成功了）
+ssh -T git@github.com
+```
+
+> `Permission denied (publickey)` = 连接正常但密钥还没登记到 GitHub（第 3 步没做完）；
+> `Connection timed out` = 网络/防火墙挡了 22 端口，改用 `ssh.github.com:443`，见下方「22 端口被挡」。
+
+### 建仓库并推送
+
+```bash
+# 1. 在 GitHub 网页新建**空**仓库：https://github.com/new
+#    名字填 spring-ai-agent-lab
+#    ⚠️ 不要勾选 "Add a README / .gitignore / license"，否则远程会有初始提交，push 会被拒
+
+# 2. 关联远程（只做一次）
+git remote add origin git@github.com:<你的用户名>/spring-ai-agent-lab.git
+
+# 3. 确认分支名并推送
 git branch -M main
 git push -u origin main
 ```
 
-如果本地提交已经生成、但想改作者信息：
+`-u` 的作用是把本地 `main` 和 `origin/main` 绑定，**之后直接 `git push` / `git pull` 就行，不用再带参数**。
+
+### 常用后续操作
 
 ```bash
+git push                      # 推新提交（已绑定上游后）
+git log --oneline --graph     # 看提交图
+git remote -v                 # 看远程地址（fetch/push 两行都应是 git@github.com:...）
+```
+
+### 22 端口被挡怎么办
+
+公司网络常封 22 端口。改用 GitHub 的 HTTPS 备用通道（走 443，协议仍是 SSH）：
+
+```bash
+cat >> ~/.ssh/config <<'EOF'
+Host github.com
+  HostName ssh.github.com
+  Port 443
+  User git
+EOF
+
+ssh -T git@github.com   # 再验一次
+```
+
+### 想改本地提交的作者信息
+
+```bash
+# 改全局默认身份
+git config --global user.name  "你的GitHub用户名"
+git config --global user.email "你的GitHub邮箱"
+
+# 重写全部历史提交的作者（谨慎：会改写 commit hash，已推送的仓库不要用）
 git rebase --root --exec 'git commit --amend --no-edit --reset-author'
 ```
+
+> 邮箱建议用 GitHub 的 `<用户名>@users.noreply.github.com`：既能正确归属到你的账号，
+> 又不会把你的真实邮箱暴露在公开提交记录里。
 
 ---
 
