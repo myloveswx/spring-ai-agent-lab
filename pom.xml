@@ -15,7 +15,7 @@
     <artifactId>spring-ai-agent-lab</artifactId>
     <version>1.0.0</version>
     <name>spring-ai-agent-lab</name>
-    <description>Spring AI 2.0 渐进式 Agent 学习项目（7 个阶段）</description>
+    <description>Spring AI 2.0 渐进式 Agent 学习项目（8 个阶段）</description>
 
     <properties>
         <java.version>21</java.version>
@@ -90,6 +90,40 @@
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-mcp-client</artifactId>
+        </dependency>
+
+        <!-- Stage 8：RAG 知识库（L1 朴素 RAG）
+             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+             两块拼图，缺一不可：
+
+             (1) spring-ai-starter-model-transformers —— 「嵌入模型」
+                 在本地用 ONNX Runtime 跑 HuggingFace 的 Transformers 模型，
+                 也就是把一段文本变成一串 float 向量。
+                 ★ 选它的原因：RAG 必须要有 EmbeddingModel，而 DeepSeek 官方
+                   **不提供** embedding 接口（spring-ai-starter-model-deepseek
+                   里根本没有 embed 相关的类）。所以嵌入只能另找一家：
+                   OpenAI / 智谱 / 通义 / 或者——本方案——完全离线本地跑。
+                 它带进来的关键依赖：
+                   - com.microsoft.onnxruntime:onnxruntime（含各平台原生库）
+                   - ai.djl.huggingface:tokenizers（分词器，读 tokenizer.json）
+                   - com.knuddels:jtokkit（TokenTextSplitter 切块要用）
+
+             (2) spring-ai-vector-store-advisor —— 「检索 + 增强」
+                 提供 QuestionAnswerAdvisor：请求进来时先拿用户问题去向量库
+                 检索 topK 片段，再把片段拼进 Prompt 交给大模型。
+                 它自身依赖 spring-ai-vector-store，所以 SimpleVectorStore
+                 （内存向量库，可 save/load 到文件）也一起来了。
+
+             注意：这个 artifact 里**只有类、没有自动配置**（不含
+             META-INF/spring/...AutoConfiguration.imports），
+             所以 QuestionAnswerAdvisor / VectorStore 都需要我们自己声明成 Bean。 -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-model-transformers</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-vector-store-advisor</artifactId>
         </dependency>
 
         <!-- Stage 2 进阶：持久层改用 MyBatis-Plus

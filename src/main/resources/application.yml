@@ -97,6 +97,50 @@ spring:
         enabled: false
 
 # =====================================================================
+# Stage 8：RAG 知识库（L1 朴素 RAG）
+#   装配类：com.agentlab.stage8.config.Stage8RagConfig
+#   入口  ：/stage8/kb/**（入库 / 检索 / 统计）、/stage8/chat（带检索的问答）
+# =====================================================================
+agentlab:
+  rag:
+    # 总开关。关掉后 Stage 8 的全部 Bean 与接口都不会装配，
+    # 用于「模型文件没准备好」或「只想跑 Stage 1~7」时把影响面收敛到零。
+    enabled: true
+
+    # 本地 ONNX 嵌入模型目录，目录内需要 tokenizer.json + model.onnx
+    # 模型：BAAI/bge-small-zh-v1.5（中文小模型，约 95MB）
+    # 之所以用本地目录而不是自动下载：本机实测直连 HuggingFace 仅 ~51KB/s，
+    # 95MB 要等近 30 分钟；本地文件是零网络依赖、确定性的。
+    # 想换个位置就改环境变量，无需动代码：
+    #   Windows CMD : set AGENTLAB_RAG_MODEL_DIR=D:\models\bge-small-zh-v1.5
+    model-dir: ${AGENTLAB_RAG_MODEL_DIR:D:/workspace/.toolchain/models/bge-small-zh-v1.5}
+
+    # 单次检索返回的片段数。4 是「够用且不撑爆上下文」的起点。
+    top-k: 4
+    # 余弦相似度下限，低于它的候选直接丢弃。
+    # 想更保守（宁可多给线索）调到 0.3 左右；想更严格调到 0.6。
+    similarity-threshold: 0.5
+
+    # 向量库落盘位置。
+    # SimpleVectorStore 是内存实现，重启即丢；这里在每次入库/清空后自动落盘
+    # （清单 + 向量一起写，保证两者代际一致），重启时自动恢复，不必重跑嵌入。
+    # 注意：清单（*.manifest.tsv）是权威账本，清单里没有的向量一律不认 ——
+    # 这样才不会出现「删不掉的孤儿向量」。
+    store-path: ${AGENTLAB_RAG_STORE_PATH:D:/workspace/.toolchain/rag-store/stage8-store.json}
+
+    # 启动时预热一次嵌入。首次调用 ONNX 会解压原生库 + 触发 Defender 首扫，
+    # 实测 60 秒以上；不预热的话这 60 秒会砸在用户的第一次提问上。
+    warmup: true
+
+    # 切块参数（TokenTextSplitter）
+    # 注意：这个切块器**没有重叠（overlap）参数** —— 相邻块不共享内容。
+    # 关键句正好落在切口上时会被劈成两半，这是 L1 用现成切块器的固有代价，
+    # 「自己写一个带重叠的 TextSplitter」是 L2 的第一个升级点。
+    chunk-size: 400               # 每块目标 token 上限
+    min-chunk-size-chars: 200     # 小于这个字符数的块会被并进相邻块（中文 1 字≈1 字符）
+    min-chunk-length-to-embed: 5  # 小于这个字符数的碎片直接丢弃（目录行/孤立标题）
+
+# =====================================================================
 # 持久层：MyBatis-Plus（Stage 2 记忆落库）
 #   Mapper 接口：com.agentlab.persistence.mapper.ChatMemoryMapper
 #   由启动类上的 @MapperScan 扫描注册，无需逐个写 @Mapper

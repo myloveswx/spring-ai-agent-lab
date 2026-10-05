@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>所以这里用真实 HTTP 请求（而不是 MockMvc）来验证：
  * <ul>
  *   <li>{@code /v3/api-docs} 返回 200，且 JSON 里有我们声明的标题</li>
- *   <li>7 个阶段 + 诊断分组都出现在 tags 里</li>
+ *   <li>8 个阶段 + 诊断分组都出现在 tags 里</li>
  *   <li>每个阶段的路径都被扫描到了（按前缀抽查）</li>
  *   <li>{@code /swagger-ui/index.html} 能拿到 UI 页面（证明 webjar 静态资源也在）</li>
  * </ul>
@@ -43,7 +43,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
                 "spring.ai.deepseek.api-key=test-key-for-context-load",
-                "spring.ai.mcp.client.enabled=false"
+                "spring.ai.mcp.client.enabled=false",
+                // 这个测试只关心「文档里有没有这些路径」，不需要真的把模型载进来跑一遍，
+                // 更要紧的是别去读/写开发时攒下来的真实向量库。
+                "agentlab.rag.store-path=target/stage8-openapi-test-store.json",
+                "agentlab.rag.warmup=false"
         })
 class OpenApiDocsTest {
 
@@ -77,7 +81,7 @@ class OpenApiDocsTest {
         assertTrue(body.contains("\"1.0.0\""), "缺少版本号");
 
         // 分组：名字里带「Stage N」的都必须在
-        for (int stage = 1; stage <= 7; stage++) {
+        for (int stage = 1; stage <= 8; stage++) {
             assertTrue(body.contains("Stage " + stage + " ·"),
                     "缺少 Stage " + stage + " 分组，检查该阶段 Controller 的 @Tag 与 OpenApiConfig 常量是否一致");
         }
@@ -85,7 +89,7 @@ class OpenApiDocsTest {
     }
 
     @Test
-    @DisplayName("OpenAPI JSON：7 个阶段的路径应全部被扫描到")
+    @DisplayName("OpenAPI JSON：8 个阶段的路径应全部被扫描到")
     void apiDocsShouldExposeEveryStagePath() throws Exception {
         String body = get("/v3/api-docs").body();
 
@@ -107,6 +111,16 @@ class OpenApiDocsTest {
                 "/stage6/lab/compare",
                 "/stage6/lab/catalog",
                 "/stage6/lab/chat",
+                // Stage 8 RAG：kb/** 是「不经过大模型」的检索层端点，chat 是生成层端点。
+                // 这个划分本身就是 L1 的教学设计 —— 排 RAG 问题要先看检索层。
+                "/stage8/kb/ingest",
+                "/stage8/kb/ingest-sample",
+                "/stage8/kb/search",
+                "/stage8/kb/stats",
+                "/stage8/kb/save",
+                "/stage8/kb/load",
+                "/stage8/chat",
+                "/stage8/chat/compare",
                 "/diagnostics/encoding/text",
                 "/diagnostics/encoding/json"
         };

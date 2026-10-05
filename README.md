@@ -32,6 +32,19 @@ Spring AI 2.0 是一次「地基重造 + 面向 Agent 重构」，不是简单�
 - **JDK 21+**（Spring AI 2.0 无法在 Spring Boot 3.x 上下文中运行）
 - Maven 3.9+
 - 一个 DeepSeek API Key（[platform.deepseek.com](https://platform.deepseek.com)）
+- **Stage 8 额外需要**：本地 ONNX 嵌入模型（约 95MB）。DeepSeek 不提供 embedding 接口，
+  RAG 必须另配一个嵌入模型，本项目用本地离线模型 `BAAI/bge-small-zh-v1.5`。
+
+  ```bash
+  # 走国内镜像，实测 ~1.7MB/s，约 1 分钟（直连 HuggingFace 只有 ~51KB/s，要等半小时）
+  mkdir -p D:/workspace/.toolchain/models/bge-small-zh-v1.5 && cd $_
+  curl -L -o model.onnx     https://hf-mirror.com/BAAI/bge-small-zh-v1.5/resolve/main/onnx/model.onnx
+  curl -L -o tokenizer.json https://hf-mirror.com/BAAI/bge-small-zh-v1.5/resolve/main/tokenizer.json
+  ```
+
+  想放别处就设环境变量 `AGENTLAB_RAG_MODEL_DIR`，或改 `application.yml` 里的
+  `agentlab.rag.model-dir`。**暂时不想搞模型**的话，把 `agentlab.rag.enabled` 设为 `false`，
+  Stage 8 的装配与接口会整块消失，Stage 1~7 照常可用。
 
 ---
 
@@ -60,6 +73,10 @@ mvn spring-boot:run
 
 > 如果启动报 `Port xxxx was already in use`，说明你的环境里有 `SERVER_PORT` / `SERVER__PORT` 之类的环境变量覆盖了配置，用 `mvn spring-boot:run -Dspring-boot.run.arguments=--server.port=8090` 显式指定即可。
 
+启动日志里会有一行 `Stage 8 · 嵌入预热完成：维度 = 512，耗时 N ms`。
+那 N 如果是 5 位数别慌 —— 首次调用 ONNX 要解压原生库并触发杀软首扫，之后稳态只要 20~90ms。
+预热就是把这笔一次性开销从「用户第一次提问」挪到「启动期」。
+
 ### 3. 跑测试（不需要 API Key、不联网）
 
 ```bash
@@ -79,7 +96,7 @@ mvn test
 
 ---
 
-## 7 个阶段
+## 8 个阶段
 
 | 阶段 | 接口前缀 | 学到什么 |
 |---|---|---|
@@ -90,6 +107,7 @@ mvn test
 | 5 | `/stage5/**` | 结构化输出 `.entity()` + `StructuredOutputValidationAdvisor` 自纠错 |
 | 6 | `/stage6/**` | 12 个工具场景 + **渐进式工具披露**（ToolSearchToolCallingAdvisor） |
 | 7 | `/stage7/**` | MCP 客户端接入（默认关闭，按下方步骤开启） |
+| 8 | `/stage8/**` | **RAG 知识库（L1 朴素 RAG）**：本地 ONNX 嵌入 + 向量检索 + QuestionAnswerAdvisor |
 
 ---
 
@@ -280,9 +298,204 @@ curl "http://localhost:8080/stage7/chat?message=列出 D:/workspace 下的文件
 
 ---
 
+### Stage 8 — RAG 知识库（L1 朴素 RAG）
+
+前面 7 个阶段的模型都只能靠「训练时记住的东西 + 你当场给的提示」回答。
+Stage 8 补上第三种信息源：**你自己的资料**。
+
+#### 先说清楚「L1 朴素」是什么意思
+
+整条链路只有三步，没有任何技巧：
+
+```
+① 入库（离线，一次性）
+   文本 ──切块──▶ 若干 Document ──EmbeddingModel 逐块转向量──▶ VectorStore
+
+② 检索 + 增强（每次提问）
+   用户问题 ──EmbeddingModel 转向量──▶ VectorStore 取 topK 相似片段
+            ──把片段拼进 Prompt──▶ 大模型 ──▶ 带依据的回答
+```
+
+「朴素」指的是：**检索只做一次向量相似度，查询原样使用、不改写、不重排、
+也不判断「到底要不要检索」**。后面所有优化（L2 调参、L3 模块化、L4 混合检索 + 重排、
+L5 Agentic 自主检索）都是在往这三个环节里加料。所以 L1 的目标不是效果好，
+而是**先把链路跑通、并且能直接看见「检索到底命中了什么」**。
+
+#### 三个 Bean，各自解决什么问题
+
+| Bean | 职责 | 为什么必须自己声明 |
+|---|---|---|
+| `TransformersEmbeddingModel` | 文本 → 向量 | DeepSeek **没有** embedding 接口，嵌入只能另找一家；这里用本机 ONNX 模型，完全离线 |
+| `SimpleVectorStore` | 存向量 + 相似度检索 | 本机无 Docker，不引外部向量库；它是「一个 Map + 遍历算余弦」，千级片段够用 |
+| `QuestionAnswerAdvisor` | 「检索 → 拼 Prompt」这段胶水 | `spring-ai-vector-store-advisor` 里**只有类、没有自动配置** |
+
+#### 快速体验（按这个顺序最有感知）
+
+```bash
+# 启动（RAG 的模型没配好时会被拖住，所以先确认本地模型存在）
+mvn spring-boot:run -Dspring-boot.run.arguments=--server.port=8090
+
+# ① 先证明「模型原本不知道」—— 示例语料里的公司是虚构的
+curl --noproxy '*' "http://localhost:8090/stage8/chat?message=追光科技的年假是怎么规定的？"
+#    → 没有任何依据，模型只能编，或者说不知道
+
+# ② 一键载入内置示例语料（resources/rag/*.md，3 篇虚构企业文档）
+curl --noproxy '*' -X POST "http://localhost:8090/stage8/kb/ingest-sample"
+
+# ③ 看检索层命中了什么 —— 这个接口不经过大模型，结果完全可复现
+curl --noproxy '*' "http://localhost:8090/stage8/kb/search?query=%E5%B9%B4%E5%81%87%E6%9C%89%E5%87%A0%E5%A4%A9"
+
+# ④ 再问同一个问题，看回答如何变成「有依据」
+curl --noproxy '*' "http://localhost:8090/stage8/chat?message=追光科技的年假是怎么规定的？"
+
+# ⑤ 最强的一个接口：一次调用并排返回「无 RAG / 有 RAG」两版回答 + 检索命中
+curl --noproxy '*' "http://localhost:8090/stage8/chat/compare?message=%E5%80%BC%E7%8F%AD%E8%A1%A5%E8%B4%B4%E5%A4%9A%E5%B0%91%E9%92%B1%E4%B8%80%E5%A4%A9"
+```
+
+#### 接口一览
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/stage8/kb/ingest` | 传 `{title, content}`，切块入库 |
+| POST | `/stage8/kb/ingest-sample` | 载入 `resources/rag/*.md`（幂等，可重复调用） |
+| GET | `/stage8/kb/search` | **纯向量检索，不调模型**（可选 `topK` / `threshold`） |
+| GET | `/stage8/kb/stats` | 文档数、块数、维度、参数、落盘状态、清单 |
+| DELETE | `/stage8/kb` | 清空（重置对照实验用） |
+| POST | `/stage8/kb/save` / `/load` | 向量库落盘 / 载入 |
+| GET | `/stage8/chat` | RAG 问答 |
+| GET | `/stage8/chat/compare` | 无 RAG vs 有 RAG 对照 |
+
+#### 要点
+
+- **`/stage8/kb/search` 是最该先用的接口**。RAG 答不准时，第一步永远是确认
+  「检索回来的片段里到底有没有答案」。这一步不掺模型、可复现，
+  是唯一能把「检索没召回」和「模型没用好上下文」区分开的地方。
+  如果这里就没召回到关键块，再怎么调提示词都是白费。
+
+- **默认提示词必须换掉**。`QuestionAnswerAdvisor` 内置模板是英文的
+  （`If the answer is not in the context, inform the user that you can't answer the question.`）。
+  本项目用中文模板，并把「资料里没有就说没有」「遇到矛盾要指出而不是挑一个」写成硬规则 ——
+  这些约束不该指望模型自觉。
+
+- **Advisor order 给的是 `-100`**。Advisor 的 order 越小越靠外层。
+  让 RAG 排在 `SimpleLoggerAdvisor`（默认 order = 0）**外面**，
+  日志里打印出来的才是「已被注入检索片段」的最终 Prompt。
+  反过来写的话，你只能看到用户原始那句提问，而「检索到了什么」就看不见了。
+
+- **`QuestionAnswerAdvisor` 替换的是 user message，不是 system message**。
+  反编译 `before()` 可以确认：它拿用户原文当 query 去检索，
+  然后把 user message 整体换成渲染后的模板。所以 `defaultSystem(...)` 仍然生效，两者叠加。
+
+- **向量库不管「清单」**。`VectorStore` 接口只有 `add / delete / similaritySearch` 四个方法，
+  没有 `count()`、没有 `list()`。所以「我一共存了哪几篇、每篇几块」必须自己维护
+  （本项目的 `*.manifest.tsv` 就是干这个的）。真实项目里的标准做法是
+  **MySQL 存业务元数据 + 向量库存向量**，用同一个 documentId 关联 —— 这是 L2 最该先做的一件事。
+
+- **切换向量库的工作量比想象中小**。接口只有 4 个方法，所以
+  「换成 MySQL 自研实现」和「换成 PGVector / Milvus」的差别只是换一个 `@Bean`。
+
+#### 踩过的坑（都写进代码注释了）
+
+1. **`@ConditionalOnMissingBean` 是按「`@Bean` 方法返回类型」匹配的**。
+   `TransformersEmbeddingModelAutoConfiguration` 上也声明了一个 `EmbeddingModel`。
+   如果手工 Bean 的返回类型写成接口 `EmbeddingModel`，自动配置的条件匹配不上，
+   会再建一个（且默认从 HuggingFace 在线拉模型的）`TransformersEmbeddingModel`，
+   结果两个同类型 Bean → 注入 `VectorStore` 时直接
+   `NoUniqueBeanDefinitionException`。
+   **结论：覆盖框架的自动配置 Bean 时，返回类型要写得尽量具体、与自动配置的保持一致。**
+   同样的道理让 `vectorStore` 的返回类型写成 `SimpleVectorStore` ——
+   因为 `save(File)` / `load(File)` 只存在于实现类上，接口里没有。
+
+2. **Spring Boot 4 用的是 Jackson 3（包名 `tools.jackson`）**。
+   容器里**没有** `com.fasterxml.jackson.databind.ObjectMapper` 这个 Bean
+   （Jackson 2 只是被 springdoc 之类顺带带进来的库，不受容器管理）。
+   一开始想注入 `ObjectMapper` 读写清单，启动直接失败：
+   `required a bean of type 'com.fasterxml.jackson.databind.ObjectMapper' that could not be found`。
+   最后清单改成最朴素的 TSV —— 自定格式的代价是要自己处理分隔符转义（制表符/换行替换成空格）。
+
+3. **`TokenTextSplitter` 不支持重叠（overlap）**。
+   它的构造函数里根本没有这个参数，相邻块不共享内容。
+   于是关键句正好落在切口上时会被劈成两半，两个块各拿半句、谁也检索不爽。
+   这不是配置问题，是 L1 用现成切块器的固有代价 ——
+   **自己写一个带重叠的 `TextSplitter` 是 L2 的第一个升级点。**
+
+4. **首次嵌入要 60 秒以上**。花在 onnxruntime 解压原生库 + Windows Defender 首次扫描上。
+   实测：首次 `embed()` 60s+，之后稳态 20~90ms/条。
+   不预热的话这 60 秒会精确砸在用户第一次提问上，现象非常像「服务挂了」。
+   （本机现在原生库已解压过，实测预热只要 **1.5 秒**。）
+
+5. **`clear()` 之后还能检索到内容 —— 孤儿向量**。这是调试过程中真实撞到的设计缺陷：
+   `清单` 每次入库/清空都写盘，`向量文件` 原本只在手动 `/kb/save` 时才写，
+   于是两者处在**不同的「代际」**。重启后把旧代际向量灌进内存，
+   而清单里的 id 一个都对不上 → `clear()` 按清单 id 去删，删的是「不存在的 id」，
+   旧向量永远留在库里。修正两条，缺一不可：**① 清单即为真相**（清单为空就不加载向量文件）；
+   **② 变更即落盘**（入库/清空后清单与向量一起写）。
+   通用教训：**「谁是权威」必须在设计时讲清楚** —— 让缓存当真相就会产生删不掉的残留状态。
+
+6. **中文参数经 Git Bash 传给 `curl.exe` 会被转成 GBK**。这个是纯 Windows 环境坑，
+   跟服务端无关，但排查起来很费时间。现象：
+   ```bash
+   # ❌ 中文写在命令行参数里
+   curl -X POST localhost:8090/stage8/kb/ingest -H 'Content-Type: application/json' \
+        -d '{"title":"差旅报销","content":"..."}'
+   # → 400
+   ```
+   服务端日志给出真因：
+   ```
+   HttpMessageNotReadableException: JSON parse error: Invalid UTF-8 start byte 0xb2
+   ```
+   `0xb2` 正是 GBK 里「差」的首字节 —— <b>Git Bash 把 argv 交给原生 `curl.exe` 时按 ANSI（GBK）做了转换</b>。
+   同样地，`curl -G --data-urlencode "query=年假"` 也会因此 400（curl 会把 GBK 字节原样百分号编码）。
+   **正确做法**：中文一律不放进命令行参数 ——
+   查询串先百分号编码好再拼进 URL，请求体写成 UTF-8 文件用 `--data-binary @file` 发。
+   （本次验证就是按这个规矩写脚本的；脚本含本机绝对路径，所以没入库。）
+
+   > 顺带一提：服务端拒收非法 UTF-8 是**正确行为**，别去改它。
+   > 要改的是客户端怎么发。
+
+#### ⚠️ 示例语料里有一处「故意矛盾」，别当 bug
+
+示例语料是 3 篇**虚构**企业文档（`resources/rag/*.md`）。之所以用虚构内容：
+大模型对这些条款零先验，「答对了 = 真的检索到了」才能被严格证明。
+
+其中《员工手册》写「工作日值班 **200** 元/天」，《运维值班与故障响应规范》写 **300** 元/天 ——
+**这是刻意设计的**。RAG 的价值不只是「答得出来」，还包括**把知识库自身的矛盾暴露出来**。
+提示词里明确要求「遇到矛盾必须指出并分别列出」，所以问值班补贴时，
+正确表现是「指出两份文档不一致」，而不是随便挑一个数字。
+
+#### 示例语料长什么样
+
+| 文件 | 内容 |
+|---|---|
+| `01-员工手册.md` | 考勤与远程办公、年假分档、加班与调休、值班补贴、报销、保密 |
+| `02-产品与定价.md` | 三条产品线、标准报价、折扣政策、SLA、退订与续费 |
+| `03-运维值班与故障响应.md` | 发布窗口与冻结期、故障等级、值班安排与补贴、监控、变更管理 |
+
+#### 与前面阶段的缝合点
+
+- **Stage 2（会话记忆）+ Stage 8**：RAG 只负责往「当前这一轮」注入资料，
+  多轮追问时历史里并没有资料原文 —— 想让它「接着上文问」就需要把两者串起来。
+- **Stage 3（工具调用）**：把「检索」包装成一个 `@Tool`，模型就能自己决定要不要检索、
+  检索几次、换什么关键词 —— 这就是通往 L5 Agentic RAG 的自然路径。
+- **Stage 6（渐进式披露）+ Stage 8**：一个是「工具太多要筛选」，一个是「资料太多要筛选」，
+  本质是同一个问题：**上下文窗口是稀缺资源，进来之前先按相关度筛一遍。**
+
+#### 验证测试
+
+```bash
+mvn test -Dtest=Stage8RagTest
+```
+
+9 个用例，**全程离线**（嵌入用本机 ONNX、检索用内存向量库、DeepSeek Key 是假的且不会被调用）。
+它验证的是检索侧那些**确定性**的行为：命中来源是否正确、分数是否降序、
+阈值能否过滤、重复入库是否幂等、清空是否干净、落盘能否往返。
+—— 把 Agent 链路里可以确定化的部分确定化，是让 Agent 可回归的前提。
+
+---
+
 ## 接口文档（Swagger / OpenAPI）
 
-24 个接口分布在 7 个阶段里，靠 curl 手敲很容易记混。项目引入了 **springdoc-openapi 3.1.1** 自动生成 OpenAPI 3.1 文档。
+30+ 个接口分布在 8 个阶段里，靠 curl 手敲很容易记混。项目引入了 **springdoc-openapi 3.1.1** 自动生成 OpenAPI 3.1 文档。
 
 ### 为什么是 3.x，不是 2.x
 
@@ -501,6 +714,11 @@ spring-ai-agent-lab/
 │   │   ├── config/Stage6ToolConfig.java
 │   │   └── tools/CrmTools.java
 │   ├── stage7/McpClientController.java       # MCP 客户端（条件装配）
+│   ├── stage8/                               # RAG 知识库（L1 朴素 RAG）
+│   │   ├── config/RagProperties.java         # agentlab.rag.* 可调参数（topK/阈值/切块/预热）
+│   │   ├── config/Stage8RagConfig.java       # Embedding / VectorStore / QA Advisor + 预热
+│   │   ├── KnowledgeBaseService.java         # 切块 + 入库 + 检索 + 清单管理 + 落盘
+│   │   └── Stage8RagController.java          # /stage8/kb/** 与 /stage8/chat[/compare]
 │   ├── persistence/                          # 持久层（MyBatis-Plus）
 │   │   ├── entity/ChatMemoryEntity.java      # @TableName 映射（无主键、关键字列名转义）
 │   │   ├── mapper/ChatMemoryMapper.java      # extends BaseMapper，零 XML
@@ -512,11 +730,14 @@ spring-ai-agent-lab/
 │   └── diagnostics/EncodingDiagnosticController.java  # 编码自检端点
 ├── src/main/resources/
 │   ├── application.yml
-│   └── application-mcp.yml.example
+│   ├── application-mcp.yml.example
+│   └── rag/{01-员工手册,02-产品与定价,03-运维值班与故障响应}.md   # Stage 8 内置示例语料（虚构）
 └── src/test/java/com/agentlab/
     ├── AgentLabApplicationTests.java         # 上下文装配冒烟测试
     ├── OpenApiDocsTest.java                  # 真实 HTTP 校验 /v3/api-docs 与 Swagger UI
-    └── stage3/ToolsTest.java                 # 工具单测
+    ├── stage3/ToolsTest.java                 # 工具单测
+    ├── stage6/lab/ToolIndexLabTest.java      # 四条检索策略的纯单测（可复现）
+    └── stage8/Stage8RagTest.java             # RAG 检索侧单测（全程离线，不调用 DeepSeek）
 ```
 
 ---

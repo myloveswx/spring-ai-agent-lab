@@ -46,6 +46,7 @@ public class OpenApiConfig {
     public static final String TAG_STAGE5 = "Stage 5 · 结构化输出";
     public static final String TAG_STAGE6 = "Stage 6 · 渐进式工具披露";
     public static final String TAG_STAGE7 = "Stage 7 · MCP 客户端";
+    public static final String TAG_STAGE8 = "Stage 8 · RAG 知识库";
     public static final String TAG_DIAGNOSTICS = "工具 · 编码自检";
 
     @Bean
@@ -57,7 +58,7 @@ public class OpenApiConfig {
                         .description("""
                                 Spring AI 2.0 渐进式 Agent 学习项目的接口文档。
 
-                                7 个阶段对应 Agent 能力的 7 个台阶，建议按顺序阅读 / 调用：
+                                8 个阶段对应 Agent 能力的 8 个台阶，建议按顺序阅读 / 调用：
 
                                 1. **ChatClient 基础** —— 同步问答、Prompt 模板、SSE 流式输出
                                 2. **会话记忆** —— 多轮上下文、`conversationId` 隔离、记忆落库到 MySQL
@@ -66,10 +67,16 @@ public class OpenApiConfig {
                                 5. **结构化输出** —— `.entity()` 反序列化 + 校验失败自动重试
                                 6. **渐进式工具披露** —— 工具多了以后按相关度动态筛选，而非全量下发
                                 7. **MCP 客户端** —— 接入外部 MCP Server（默认关闭）
+                                8. **RAG 知识库** —— 本地 ONNX 嵌入 + 向量检索 + `QuestionAnswerAdvisor`
 
                                 > 除「编码自检」外，所有对话接口都需要真实调用 DeepSeek，
                                 > 因此启动前必须先设置环境变量 `DEEPSEEK_API_KEY` ——
                                 > 该 Key 缺失时不是「调用报 401」，而是**应用直接启动失败**。
+                                >
+                                > Stage 8 另有前置条件：本地需存在 ONNX 嵌入模型
+                                > （默认 `D:/workspace/.toolchain/models/bge-small-zh-v1.5`）。
+                                > 模型缺失时整块装配会失败，把 `agentlab.rag.enabled` 设为 `false`
+                                > 即可让 Stage 1~7 不受影响地启动。
                                 """)
                         .contact(new Contact().name("追光者"))
                         .license(new License()
@@ -98,6 +105,10 @@ public class OpenApiConfig {
                         new Tag().name(TAG_STAGE7)
                                 .description("MCP 客户端接入，默认关闭；开启后需在 Swagger 中触发 "
                                         + "（注意需重启才生效）。"),
+                        new Tag().name(TAG_STAGE8)
+                                .description("L1 朴素 RAG：本地 ONNX 嵌入 + 内存向量库 + 检索增强问答。"
+                                        + "建议先跑 /stage8/kb/search（不含模型、结果可复现），"
+                                        + "再看 /stage8/chat/compare 的对照效果。"),
                         new Tag().name(TAG_DIAGNOSTICS)
                                 .description("不依赖大模型的纯本地端点，用于定位请求 / 响应编码问题。")));
     }
