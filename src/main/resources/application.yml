@@ -72,6 +72,13 @@ spring:
           enabled: true
           # regex（默认，零额外依赖）/ lucene / vector
           tool-index-type: regex
+          # 该 Advisor 按「会话」缓存工具索引，会话标识从请求 context 里取。
+          # 默认 key = ChatMemory.CONVERSATION_ID（值为 chat_memory_conversation_id）。
+          # 取不到会直接抛 IllegalArgumentException → 接口 500，所以 Controller 必须
+          # .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, ...)) 显式塞进去
+          # （详见 com.agentlab.stage6.ToolSearchChatController 的类注释）。
+          # 想换 key 就打开下面一行，同时改 Controller：
+          # session-id-key-name: stage6-session
 
     # 注意：这里已不再有 spring.ai.chat.memory.repository.jdbc 段落。
     # 持久层换成 MyBatis-Plus 后，ChatMemoryRepository 由

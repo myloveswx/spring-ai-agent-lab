@@ -1,5 +1,8 @@
 package com.agentlab;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -107,6 +110,30 @@ class OpenApiDocsTest {
         // Stage 7 默认关闭（spring.ai.mcp.client.enabled=false），不应出现在文档里。
         // 这正好反向验证了「@ConditionalOnProperty 未命中 → Bean 不创建 → 文档里也没有」。
         assertTrue(!body.contains("/stage7/"), "Stage 7 默认关闭，不应出现在文档中");
+    }
+
+    @Test
+    @DisplayName("Stage 6：/stage6/chat 必须声明 conversationId 参数")
+    void stage6ChatMustDeclareConversationId() throws Exception {
+        JsonNode root = new ObjectMapper().readTree(get("/v3/api-docs").body());
+        JsonNode params = root.at("/paths/~1stage6~1chat/get/parameters");
+
+        assertTrue(params.isArray() && !params.isEmpty(), "/stage6/chat 没有 parameters 定义");
+
+        // ToolSearchToolCallingAdvisor 按「会话」缓存工具索引，会话标识从请求 context 里读，
+        // key 是 ChatMemory.CONVERSATION_ID（chat_memory_conversation_id）。
+        // 接口若不把它塞进 context，每次调用都会抛
+        //   IllegalArgumentException: context must contain a non-null value for 'chat_memory_conversation_id'
+        // 直接 500（这个坑真踩过）。把参数固化进文档，防止以后被误删。
+        boolean hasConversationId = false;
+        for (JsonNode p : params) {
+            if ("conversationId".equals(p.path("name").asText())) {
+                hasConversationId = true;
+            }
+        }
+        assertTrue(hasConversationId,
+                "/stage6/chat 缺少 conversationId 参数：ToolSearchToolCallingAdvisor 依赖它来取会话 ID，"
+                        + "缺失会导致每次调用都 500");
     }
 
     @Test

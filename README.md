@@ -188,12 +188,12 @@ curl "http://localhost:8080/stage5/analyze/validated?indexCode=000001"
 ```bash
 curl "http://localhost:8080/stage6/chat?message=客户 C1001 还有多少积分？"
 curl "http://localhost:8080/stage6/chat?message=客户 C1001 的订单 SO202610010001 到哪了？顺便看看他有哪些优惠券"
-curl "http://localhost:8080/stage6/chat?message=帮 C1001 查一下最近的订单、物流、发票状态和账户余额"
+curl "http://localhost:8080/stage6/chat?message=帮 C1001 查一下最近的订单、物流、发票状态和账户余额&conversationId=user-42"
 ```
 
 **要点**：
 
-- 本项目注册了 12 个 CRM 工具。工具一多，把**全部工具定义**塞进每次请求会带来 **token 成本暴涨** + **模型选错工具**两个问题。
+- 本项目注册了 13 个 CRM 工具。工具一多，把**全部工具定义**塞进每次请求会带来 **token 成本暴涨** + **模型选错工具**两个问题。
 - `ToolSearchToolCallingAdvisor` 提供**渐进式工具披露**：先对全量工具建一次索引，每轮只把最相关的少数几个发给模型。官方实测可省 **34% ~ 64%** token。
 - 索引类型三选一（`spring.ai.chat.client.tool-search-advisor.tool-index-type`）：
   | 类型 | 额外依赖 |
@@ -201,6 +201,14 @@ curl "http://localhost:8080/stage6/chat?message=帮 C1001 查一下最近的订�
   | `regex`（默认） | 无 |
   | `lucene` | `org.apache.lucene:lucene-core` |
   | `vector` | 需要 `VectorStore` Bean |
+- ⚠️ **必须传会话 ID，否则接口直接 500。** 这个 Advisor 按「会话」缓存工具索引，它要从请求 context 里取一个会话标识，key 是 `ChatMemory.CONVERSATION_ID`（值 `chat_memory_conversation_id`）。取不到就抛：
+  ```
+  IllegalArgumentException: context must contain a non-null value for 'chat_memory_conversation_id'
+  ```
+  解决办法是显式把它塞进 context：接口上收一个 `conversationId` 参数，再用
+  `.advisors(a -> a.param(ChatMemory.CONVERSATION_ID, conversationId))` 注入。
+  **注意它并不要求你开对话记忆** —— Advisor 只读这个 key，跟有没有挂 `ChatMemoryAdvisor` 无关。
+  若不想沿用这个名字，用 `tool-search-advisor.session-id-key-name` 换 key 即可。
 - 对比实验：把 `tool-search-advisor.enabled` 改成 `false` 重启，再问同样的问题，观察下发到模型的工具数量差异。
 - ⚠️ 注意一个容易踩的坑：这个开关**只作用于 Spring Boot 自动装配的那个 `ChatClient.Builder`**。Stage 1–5 用 `ChatClient.builder(chatModel)` 手工构建，因此完全不受影响 —— 这也顺带说明了「自动装配默认值」与「手工构建」两条路线的边界。
 

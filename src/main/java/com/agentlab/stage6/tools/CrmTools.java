@@ -9,7 +9,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.List;
 
 /**
- * Stage 6 的工具集：模拟一个 CRM/客服系统的工具面（12 个工具）。
+ * Stage 6 的工具集：模拟一个 CRM/客服系统的工具面（13 个工具）。
  *
  * <p>为什么要这么多工具？因为当工具数量膨胀到几十上百个时，把「全部工具定义」
  * 塞进每一次请求会带来两个问题：
