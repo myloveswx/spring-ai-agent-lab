@@ -4,9 +4,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 
 import org.junit.jupiter.api.DisplayName;
@@ -100,6 +102,11 @@ class OpenApiDocsTest {
                 "/stage5/analyze",
                 "/stage5/analyze/validated",
                 "/stage6/chat",
+                // Stage 6 检索策略实验室：把「检索」从模型链路里剥出来单独暴露的四个端点
+                "/stage6/lab/search",
+                "/stage6/lab/compare",
+                "/stage6/lab/catalog",
+                "/stage6/lab/chat",
                 "/diagnostics/encoding/text",
                 "/diagnostics/encoding/json"
         };
@@ -134,6 +141,54 @@ class OpenApiDocsTest {
         assertTrue(hasConversationId,
                 "/stage6/chat 缺少 conversationId 参数：ToolSearchToolCallingAdvisor 依赖它来取会话 ID，"
                         + "缺失会导致每次调用都 500");
+    }
+
+    @Test
+    @DisplayName("Stage 6 实验室：/compare 应并排返回四条策略的命中结果")
+    void labCompareShouldReturnAllStrategies() throws Exception {
+        // 中文必须预编码 —— 未编码的中文字节会被 Tomcat 在进 Spring 之前挡掉，返回 HTML 400 页。
+        String query = URLEncoder.encode("钱什么时候能退回来", StandardCharsets.UTF_8);
+        HttpResponse<String> response = get("/stage6/lab/compare?q=" + query);
+
+        assertEquals(200, response.statusCode(), "实验室检索端点应可直接访问（它不调用模型）");
+
+        JsonNode root = new ObjectMapper().readTree(response.body());
+        assertEquals(13, root.get("toolCount").asInt(), "实验室应索引 CrmTools 的全部 13 个工具");
+
+        JsonNode results = root.get("results");
+        assertEquals(4, results.size(), "应返回 regex / keyword / synonym / category 四条策略");
+
+        JsonNode synonym = null;
+        JsonNode regex = null;
+        for (JsonNode r : results) {
+            if ("synonym".equals(r.get("strategy").asText())) {
+                synonym = r;
+            }
+            if ("regex".equals(r.get("strategy").asText())) {
+                regex = r;
+            }
+        }
+        assertTrue(synonym != null, "缺少 synonym 策略结果");
+        assertEquals("applyRefund", synonym.get("hits").get(0).get("toolName").asText(),
+                "同义词策略应把口语 query「钱什么时候能退回来」定位到 applyRefund");
+        assertTrue(regex != null && regex.get("hits").isEmpty(),
+                "内置 regex 策略对这句中文口语应无命中 —— 这正是实验室要演示的基线");
+    }
+
+    @Test
+    @DisplayName("Stage 6 实验室：分类过滤应把召回锁死在指定业务域")
+    void labSearchShouldRespectCategoryFilter() throws Exception {
+        String query = URLEncoder.encode("帮 C1001 查一下", StandardCharsets.UTF_8);
+        HttpResponse<String> response = get("/stage6/lab/search?q=" + query
+                + "&strategy=category&category=logistics");
+
+        assertEquals(200, response.statusCode());
+        JsonNode hits = new ObjectMapper().readTree(response.body()).get("hits");
+        assertTrue(hits.size() > 0, "物流域应至少召回 queryLogistics");
+        for (JsonNode hit : hits) {
+            assertEquals("logistics", hit.get("category").asText(),
+                    "带 category 过滤时，命中必须全部属于该域");
+        }
     }
 
     @Test
