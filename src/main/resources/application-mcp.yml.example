@@ -35,7 +35,16 @@ spring:
         stdio:
           connections:
             filesystem:
-              command: npx
+              # ⚠️ Windows 上必须写 "npx.cmd"，不能只写 "npx"。
+              # 原因：Java 的 ProcessBuilder 最终调 CreateProcess，它不会按 PATHEXT
+              # 去补全 .cmd/.bat 后缀；而 Node 的 Windows 发行版里 "npx" 是一个无扩展名的
+              # shell 脚本（给 Git Bash 用的），于是直接报
+              #   Cannot run program "npx": CreateProcess error=2, 系统找不到指定的文件
+              # 只要带上 .cmd 后缀（或改成 cmd /c npx ...、或写绝对路径）即可。
+              #
+              # 前置条件：本机装有 Node.js 且其目录在 PATH 中
+              # （本项目装在 D:\workspace\.toolchain\node）。
+              command: npx.cmd
               args:
                 - "-y"
                 - "@modelcontextprotocol/server-filesystem"

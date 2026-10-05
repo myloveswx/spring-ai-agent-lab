@@ -228,15 +228,34 @@ SyncMcpToolCallbackProvider : ToolCallbackProvider
 ChatClient → ToolCallingAdvisor 统一驱动
 ```
 
+**前置条件**：
+
+1. **必须装 Node.js**（≥18），因为下面的 filesystem server 是通过 `npx` 拉起的。
+   本机装在 `D:\workspace\.toolchain\node`（自解压的官方 win-x64 包），已加入用户 PATH。
+   验证：`node -v` 与 `npx.cmd --version` 都能出结果。
+2. **Windows 上 `command` 必须写 `npx.cmd`，不能写 `npx`**。这不是笔误 ——
+   Java 的 `ProcessBuilder` 最终调 `CreateProcess`，它**不会**按 `PATHEXT` 补全 `.cmd`/`.bat` 后缀；
+   而 Node 的 Windows 发行版里 `npx` 是一个**无扩展名的 shell 脚本**（给 Git Bash 用的）。
+   写成 `npx` 会直接抛：
+   ```
+   java.io.IOException: Cannot run program "npx": CreateProcess error=2, 系统找不到指定的文件。
+   ```
+   实测：`npx` ❌ / `npx.cmd` ✅ / `cmd /c npx` ✅ / 绝对路径 `…\npx.cmd` ✅。
+
 **开启步骤**：
 
 ```bash
 # 1. 复制配置模板
 cp src/main/resources/application-mcp.yml.example src/main/resources/application-mcp.yml
 
-# 2. 编辑 application-mcp.yml，把 stdio 那段里的目录换成你自己的（默认已配好 npx + 国内镜像）
+# 2. 编辑 application-mcp.yml，把 stdio 那段里的目录换成你自己的
+#    （默认已配好 npx.cmd + 国内镜像；Windows 上注意 command 要带 .cmd）
 
-# 3. 用 mcp profile 启动
+# 3. 建议先把 MCP server 包拉进 npx 缓存（首次下载可能超过 20s 初始化上限）
+npx.cmd -y @modelcontextprotocol/server-filesystem D:/workspace
+# 看到 "Secure MCP Filesystem Server running on stdio" 就是拉好了，Ctrl+C 退出
+
+# 4. 用 mcp profile 启动
 mvn spring-boot:run -Dspring-boot.run.profiles=mcp
 ```
 
@@ -252,6 +271,12 @@ curl "http://localhost:8080/stage7/chat?message=列出 D:/workspace 下的文件
 - **Streamable HTTP 已成为默认传输方式**，被弃用的 SSE 传输不再推荐；STDIO 保留用于本地进程集成。
 - 注解式服务端模型（`@McpTool` / `@McpResource` / `@McpPrompt`）在 2.0 已从社区并入主仓库，一个方法注解就能把 Spring Service 暴露成 MCP 工具。
 - 国内网络注意：`registry.npmjs.org` 可能不通，模板里已加 `npm_config_registry=https://registry.npmmirror.com`。
+- **stdio server 起不来会拖垮整个应用**，不只是 stage7：`mcpSyncClients` 是全局 Bean，
+  喂给 `toolCallbackResolver`，而 `toolCallingManager` → `deepSeekChatModel` → 所有 Controller 都依赖它。
+  所以「npx 找不到」的报错栈最外层是 `basicChatController`，真正的根因在最后一行 `Caused by`。
+- Spring AI 的 MCP 初始化超时是 **20s**（`McpSyncClient.initialize()` 内部），
+  `spring.ai.mcp.client.request-timeout` 管不到它 —— 首次 `npx -y` 要下载包，很容易超时，
+  所以第 3 步的缓存预热不是可选项。
 
 ---
 
