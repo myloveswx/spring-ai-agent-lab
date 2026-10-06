@@ -44,6 +44,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartException;
 import org.springframework.web.multipart.MultipartFile;
 
 /**
@@ -263,7 +264,7 @@ public class Stage8RagController {
                                        example = "append")
                                @RequestParam(required = false, defaultValue = "append") String mode,
                                @Parameter(description = "表单字段名固定为 files，可一次选多个")
-                               @RequestParam("files") MultipartFile[] files) {
+                               @RequestParam(value = "files", required = false) MultipartFile[] files) {
         if (!"append".equalsIgnoreCase(mode) && !"upsert".equalsIgnoreCase(mode)) {
             throw new IllegalArgumentException("mode 只支持 append（追加，默认）或 upsert（按文件名覆盖），"
                     + "收到：" + mode);
@@ -683,6 +684,23 @@ public class Stage8RagController {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("error", "invalid_request");
         result.put("message", e.getMessage());
+        return result;
+    }
+
+    /**
+     * 请求压根不是 multipart（忘了 <code>-F</code>、或 Content-Type 写成了 application/json）。
+     *
+     * <p>不接这个异常的话 Spring 会把它包成 500 —— 但「客户端请求形状不对」是 400 的事，
+     * 返回 500 会让人去翻服务端日志找一个并不存在的 bug。
+     */
+    @ExceptionHandler(MultipartException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public Map<String, Object> handleMultipart(MultipartException e) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("error", "not_multipart");
+        result.put("message", "这个接口收 multipart/form-data，但没解析出文件部分：" + e.getMessage());
+        result.put("hint", "curl 示例：curl -X POST \"http://localhost:8090/stage8/kb/default/upload\""
+                + " -F \"files=@./handbook.md\"");
         return result;
     }
 
