@@ -89,10 +89,47 @@ mvn test
 
 | 入口 | 地址 | 说明 |
 |---|---|---|
+| **接口实验室** | http://localhost:8080/index.html | **本项目自带的前端**，点一下就能调接口、看结果、读讲解（见下节） |
 | Swagger UI | http://localhost:8080/swagger-ui/index.html | 可视化界面，可直接「Try it out」 |
 | OpenAPI JSON | http://localhost:8080/v3/api-docs | 机器可读，喂给 Postman / Apifox / 代码生成器 |
 
 > 换了端口就把 `8080` 换掉；`OpenApiConfig` 里声明的 `servers` 只是给「Try it out」用的默认目标地址，不影响文档本身的生成。
+
+### 5. 打开接口实验室（自带前端，零构建）
+
+启动后直接访问 <http://localhost:8080/>（根路径就是它），**不需要 npm install、不需要 build、不依赖任何外网 CDN**。整套前端就是 `src/main/resources/static/` 下的几个静态文件，由 Spring Boot 直接托管。
+
+```text
+src/main/resources/static/
+├── index.html              页面骨架：顶栏 + 阶段导航 + 主区
+└── assets/
+    ├── app.css             全部样式
+    ├── core.js             请求封装 / 表单生成 / JSON 折叠视图
+    ├── registry.js         接口的声明式描述 ← 想加接口只改这里
+    ├── renderers.js        富结果渲染（检索命中、对照实验、文档清单…）
+    └── app.js              主驱动：把声明渲染成可交互页面
+```
+
+它解决的是 Swagger UI 在这个项目里最不好用的三点：
+
+1. **中文参数**
+   Swagger 的 Try it out 和 curl 都要手工处理编码；实验室里参数由表单控件收集，浏览器统一按 UTF-8 发出，不会撞上 Git Bash 传中文被转 GBK 那个坑。
+2. **「这个接口到底在学什么」**
+   每个接口卡片里都有一段教学说明（这个接口在做什么 / 该看结果的哪一部分），并且结果不是一坨 JSON，而是按语义渲染：检索命中带相似度条、知识库列表带「设为当前库」按钮、对照实验并排显示两版回答。
+3. **多库上下文**
+   页面上有一个全局的「当前知识库」选择器，所有带 `{kbId}` 的接口自动替换——不必每次手工拼 URL。
+
+几个顺手的用法：
+
+| 用法 | 说明 |
+|---|---|
+| `#ep-<id>` | 直接展开指定接口卡片，例如 `http://localhost:8080/#ep-search` |
+| `#ep-<id>!run` | 展开并自动执行一次，**只对 GET 生效**（避免一个链接就能删数据） |
+| `?shot=1` | 关掉吸顶布局，方便无头浏览器一次性截全页 |
+
+目前只实现了 **Stage 8（RAG）** 的 19 个接口，按「库管理 / 入库与切片 / 检索 / RAG 问答 / 状态与持久化」分成 5 组学习路径。其余阶段在左侧导航里是置灰的「规划中」——加一个阶段只需要在 `registry.js` 里补一份声明，界面会自动长出来。
+
+> 其中第 3 组「检索」和第 2 组「入库」不经过大模型，**没有 API Key 也能完整验证**；第 4 组问答才需要真实的 `DEEPSEEK_API_KEY`。
 
 ---
 
