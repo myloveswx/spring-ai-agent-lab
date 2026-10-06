@@ -131,8 +131,16 @@ class OpenApiDocsTest {
                 "/stage8/kb/{kbId}/clear",
                 "/stage8/kb/{kbId}/save",
                 "/stage8/kb/{kbId}/load",
+                // 文档级增删改查
+                "/stage8/kb/docs",
+                "/stage8/kb/{kbId}/docs",
+                "/stage8/kb/docs/{docId}",
+                "/stage8/kb/{kbId}/docs/{docId}",
                 "/stage8/chat",
                 "/stage8/chat/compare",
+                // 对话的路径写法（与 ?kbId= 等价）
+                "/stage8/kb/{kbId}/chat",
+                "/stage8/kb/{kbId}/chat/compare",
                 "/diagnostics/encoding/text",
                 "/diagnostics/encoding/json"
         };

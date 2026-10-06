@@ -11,6 +11,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
@@ -112,6 +113,21 @@ public class KnowledgeBaseRegistry {
      * 中文想用就写在 {@code name} 里 —— 它只用于展示，不参与存储路径与 URL。
      */
     private static final Pattern ID_PATTERN = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_-]{0,31}");
+
+    /**
+     * 保留字：这些名字在 {@code /stage8/kb/...} 下已经被当成固定路径段用了，
+     * 拿它们当库 id 会造成「<b>永远访问不到这个库</b>」。
+     *
+     * <p>具体冲突长这样：{@code GET /stage8/kb/search} 到底是想「列出 search 这个库」
+     * 还是「在默认库里检索」？Spring 的路径匹配会优先选字面量段（也就是检索接口），
+     * 于是那个库变成了一个<b>建得出来、却谁也碰不到</b>的幽灵。</p>
+     *
+     * <p>这类「名字与路由撞车」的问题在真实系统里很常见（想想给用户起名 {@code admin} 的后果），
+     * 处理办法就是一张显式的黑名单 —— <b>让它在创建时就失败，而不是在使用时诡异</b>。
+     */
+    private static final Set<String> RESERVED_IDS = Set.of(
+            "kb", "search", "stats", "docs", "ingest", "ingest-sample",
+            "save", "load", "chat", "compare", "clear");
 
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
@@ -220,6 +236,47 @@ public class KnowledgeBaseRegistry {
     }
 
     /**
+     * 更新知识库的元数据（名称 / 备注）。<b>补的是 CRUD 里缺的那个 U。</b>
+     *
+     * <p>两个字段都是「不传就不改」：{@code name} 传 null / 空白表示保持原名；
+     * {@code description} 传 null 表示保持原备注（想清空备注请传空串 {@code ""}）。
+     * 之所以要这种「部分更新」语义：调用方只需改一个字段，
+     * 不必先把另一个读出来再原样写回 —— <b>「读-改-写」正是并发下最容易丢更新的模式</b>。
+     *
+     * <p><b>id 不能改</b>：它同时是磁盘目录名和账本主键，改名等价于
+     * 「删掉旧库 + 新建一个库」，那不是更新。要换 id 就新建一个库再导资料过去。
+     *
+     * @return 更新后的元数据
+     * @throws NoSuchElementException id 对应的库不存在
+     */
+    public synchronized KnowledgeBaseMeta update(String id, String name, String description) {
+        String safeId = normalizeId(id);
+        KnowledgeBaseMeta old = metas.get(safeId);
+        if (old == null) {
+            throw new NoSuchElementException("知识库不存在：" + safeId
+                    + "（现有：" + String.join(", ", metas.keySet()) + "）");
+        }
+        String newName = (name == null || name.isBlank()) ? old.name() : name.trim();
+        String newDesc = description == null ? old.description() : description.trim();
+
+        KnowledgeBaseMeta updated = new KnowledgeBaseMeta(safeId, newName, newDesc, old.createdAt());
+        metas.put(safeId, updated);
+
+        // 已经实例化的库要同步换掉 meta 引用。漏了这一步的话，
+        // GET /stage8/kb/{id} 显示新名字、而 /stats 显示旧名字 ——
+        // 同一份数据两个答案，这类不一致最难查。
+        KnowledgeBase live = bases.get(safeId);
+        if (live != null) {
+            live.refreshMeta(updated);
+        }
+        persistIndex();
+
+        log.info("Stage 8 · 已更新知识库元数据：id={} name={} description={}",
+                safeId, newName, newDesc);
+        return updated;
+    }
+
+    /**
      * 按 id 取库；{@code null} / 空串视为默认库。
      *
      * <p>这样「老的接口」和「新接口」可以共用同一条取值路径：
@@ -305,6 +362,11 @@ public class KnowledgeBaseRegistry {
             throw new IllegalArgumentException("知识库 id 只允许字母/数字/下划线/连字符，"
                     + "且不超过 32 个字符（它同时是磁盘目录名）：" + id
                     + "。想用中文请写在 name 字段里。");
+        }
+        if (RESERVED_IDS.contains(id.toLowerCase())) {
+            throw new IllegalArgumentException("知识库 id 不能叫「" + id
+                    + "」：它已经被固定接口路径占用（保留字：" + String.join(", ", RESERVED_IDS)
+                    + "）。换一个名字，显示名可以写在 name 里。");
         }
         return id;
     }

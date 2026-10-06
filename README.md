@@ -364,29 +364,80 @@ curl --noproxy '*' "http://localhost:8090/stage8/chat/compare?message=%E5%80%BC%
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/stage8/kb` | 列出全部知识库（id / 名称 / 备注 / 创建时间 / 是否已加载） |
-| POST | `/stage8/kb` | 建库，body `{id, name, description}`；id 只允许 `[A-Za-z0-9_-]` |
+| POST | `/stage8/kb` | 建库，body `{id, name, description}`；id 只允许 `[A-Za-z0-9_-]`，且不能用 `docs`/`search` 等保留字 |
+| GET | `/stage8/kb/{kbId}` | 查**这一个**库：名称、备注、目录、文档数、片段数 |
+| PUT | `/stage8/kb/{kbId}` | 改名称 / 备注，body `{name, description}` —— **不传的字段保持不变** |
 | DELETE | `/stage8/kb/{kbId}` | **删除**知识库（连目录一起）；默认库不允许删 |
 
 **库内操作**（`{kbId}` 换成具体库 id；**不带 kbId 的老路径等价于 `default` 库**）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/stage8/kb/{kbId}/ingest` | 传 `{title, content}`，切块入库 |
+| POST | `/stage8/kb/{kbId}/ingest` | 传 `{title, content, source?}` 切块入库。**默认追加**；加 `?mode=upsert` 才按 `source` 覆盖 |
 | POST | `/stage8/kb/{kbId}/ingest-sample` | 载入 `resources/rag/*.md`（幂等，可重复调用） |
 | GET | `/stage8/kb/{kbId}/search` | **纯向量检索，不调模型**（可选 `topK` / `threshold`） |
 | GET | `/stage8/kb/{kbId}/stats` | 文档数、块数、维度、参数、落盘状态、清单 |
-| DELETE | `/stage8/kb/{kbId}/clear` | **清空**该库内容（库本身保留） |
+| DELETE | `/stage8/kb/{kbId}/clear`<br>或 `DELETE /stage8/kb?kbId=...` | **清空**该库内容（库本身保留）。两种写法等价 |
 | POST | `/stage8/kb/{kbId}/save` `/load` | 向量库落盘 / 载入 |
 
-**问答**（`kbId` 可选，不传用 `default`）
+**文档级**（先列出来拿 `docId`，再精确操作「一篇」）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/stage8/kb/{kbId}/docs` | 列出库内每篇文档：`docId` / 标题 / 来源 / 块数 / 入库时间 |
+| GET | `/stage8/kb/{kbId}/docs/{docId}` | 看这一篇的片段清单（**含块 id 与序号，不含正文**） |
+| PUT | `/stage8/kb/{kbId}/docs/{docId}` | **覆盖更新**，body `{title?, content}` —— 重新切块入库，`docId` 不变 |
+| DELETE | `/stage8/kb/{kbId}/docs/{docId}` | 删这一篇 |
+| DELETE | `/stage8/kb/{kbId}/docs?source=...` | 按来源删一批（`source` 必传） |
+
+**问答**（`kbId` 可走 query，也可走路径）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/stage8/chat?kbId=kb1&message=...` | 只依据 `kb1` 的资料作答 |
 | GET | `/stage8/chat/compare?kbId=kb1&message=...` | 无 RAG vs 有 RAG 对照（附 `kb1` 的检索命中） |
+| GET | `/stage8/kb/{kbId}/chat?message=...` | 与上一行等价，库标识走路径 |
+| GET | `/stage8/kb/{kbId}/chat/compare?message=...` | 同上 |
 
-> 老路径 `/stage8/kb/search`、`/stage8/kb/ingest` 等**依然可用**。
-> 升级一次就作废用户所有既有命令，是很差劲的体验 —— 所以两套路径指向同一段代码。
+> 老路径 `/stage8/kb/search`、`/stage8/kb/ingest`、`DELETE /stage8/kb` 等**全部依然可用**，行为一个字没变。
+> 升级一次就作废用户所有既有命令，是很差劲的体验 —— 所以新老两套指向同一段代码。
+
+##### 三个删除接口的粒度
+
+容易混，放一起对比：
+
+| 想删什么 | 用哪个 |
+|---|---|
+| 一篇文档 | `DELETE /stage8/kb/{kbId}/docs/{docId}` |
+| 一批同来源的文档 | `DELETE /stage8/kb/{kbId}/docs?source=...` |
+| 整库的内容（库还在） | `DELETE /stage8/kb/{kbId}/clear` |
+| 连库一起删掉 | `DELETE /stage8/kb/{kbId}` |
+
+##### 为什么「改一篇」不能靠「再入库一次」
+
+`POST /kb/{kbId}/ingest` 是**追加**语义：同一篇内容灌两次，库里就有两份，
+检索时它们会互相挤占 `topK` 名额（同一段文字占掉两个位置）。
+
+改一篇的正确姿势：
+
+```bash
+# 1. 先列文档，拿到 docId
+curl --noproxy '*' "http://localhost:8090/stage8/kb/kb1/docs"
+
+# 2. 覆盖更新（title 可省，content 必传）
+printf '%s' '{"content":"新版本：单人审批上限 80000 元。"}' > doc.json
+curl --noproxy '*' -X PUT "http://localhost:8090/stage8/kb/kb1/docs/<docId>" \
+     -H 'Content-Type: application/json; charset=UTF-8' --data-binary @doc.json
+```
+
+`content` 为什么必传、不能只改标题？因为**正文原文并不在向量库里** ——
+`VectorStore` 接口只有 `add / delete / similaritySearch`，**没有 `get(id)`**。
+它存的是「片段 → 向量」，用途是「拿 query 找相似片段」，不是「按 id 读出原文」。
+想回显原文得自己另存一份（这正是 L2 要补的 MySQL 正文表）。
+
+> 顺带说明为什么默认是「追加」而不是「覆盖」：接口入库的 `source` 默认都是 `api`，
+> 如果默认按 source 覆盖，连着灌三篇不同文档就会互相把对方删掉。
+> **默认行为要对最常见的那种用法是安全的**，而不是对最省事的那次调用安全。
 
 #### 多知识库：怎么创建「知识库1 / 知识库2」
 
@@ -843,10 +894,10 @@ spring-ai-agent-lab/
 │   │   ├── config/RagProperties.java         # agentlab.rag.* 可调参数（topK/阈值/切块/预热/store-root）
 │   │   ├── config/Stage8RagConfig.java       # 嵌入模型（单例，所有库共用）+ 启动预热
 │   │   ├── config/RagAdvisors.java           # 中文提示词 + 按库现造 QuestionAnswerAdvisor
-│   │   ├── KnowledgeBase.java                # 一个库：切块 + 入库 + 检索 + 清单 + 落盘（懒加载）
+│   │   ├── KnowledgeBase.java                # 一个库：切块 + 入库 + 文档级增删改查 + 检索 + 清单 + 落盘
 │   │   ├── KnowledgeBaseMeta.java            # 库的元数据（id / 名称 / 备注 / 创建时间）
-│   │   ├── KnowledgeBaseRegistry.java        # 多库注册表：建/查/列/删 + kb-index.tsv 账本
-│   │   └── Stage8RagController.java          # /stage8/kb[/{kbId}]/** 与 /stage8/chat[/compare]
+│   │   ├── KnowledgeBaseRegistry.java        # 多库注册表：建/查/改/列/删 + kb-index.tsv 账本 + 保留字
+│   │   └── Stage8RagController.java          # /stage8/kb[/{kbId}]/**（含 /docs）、/stage8/chat[/compare]
 │   ├── persistence/                          # 持久层（MyBatis-Plus）
 │   │   ├── entity/ChatMemoryEntity.java      # @TableName 映射（无主键、关键字列名转义）
 │   │   ├── mapper/ChatMemoryMapper.java      # extends BaseMapper，零 XML
@@ -867,7 +918,8 @@ spring-ai-agent-lab/
     ├── stage6/lab/ToolIndexLabTest.java      # 四条检索策略的纯单测（可复现）
     └── stage8/
         ├── Stage8RagTest.java                # 默认库基线：检索侧单测（全程离线，不调用 DeepSeek）
-        └── Stage8MultiKnowledgeBaseTest.java # 多库：库间隔离、删库不影响别的库、边界状态码
+        ├── Stage8MultiKnowledgeBaseTest.java # 多库：库间隔离、删库不影响别的库、边界状态码
+        └── Stage8KbCrudTest.java             # 库级/文档级更新与查询：部分更新、docId 稳定、三种删除粒度
 ```
 
 ---

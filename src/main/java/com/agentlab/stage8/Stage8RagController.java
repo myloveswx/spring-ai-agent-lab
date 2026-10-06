@@ -6,6 +6,8 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 
 import com.agentlab.config.OpenApiConfig;
+import com.agentlab.stage8.KnowledgeBase.DocBrief;
+import com.agentlab.stage8.KnowledgeBase.DocDetail;
 import com.agentlab.stage8.KnowledgeBase.Hit;
 import com.agentlab.stage8.KnowledgeBase.IngestRecord;
 import com.agentlab.stage8.KnowledgeBase.Stats;
@@ -30,6 +32,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -39,12 +42,14 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * Stage 8 —— RAG 知识库（L1 朴素 RAG，支持多知识库）。
  *
- * <h2>接口分三类</h2>
+ * <h2>接口分四类</h2>
  * <ol>
- *   <li><b>库管理</b>：{@code GET/POST/DELETE /stage8/kb...} —— 建库、列出、删库。
- *       这类接口只动元数据，不碰向量。</li>
+ *   <li><b>库管理</b>：{@code /stage8/kb...} —— 建库、列出、查单个、改名称备注、删库。
+ *       只动元数据，不碰向量。</li>
  *   <li><b>库内操作（不经过大模型）</b>：入库、纯向量检索、统计、清空、落盘。
  *       这是排查 RAG 问题的第一现场 —— <b>不掺模型，结果完全可复现</b>。</li>
+ *   <li><b>文档级增删改查</b>：{@code /kb/{kbId}/docs...} —— 粒度从「整库」降到「一篇」。
+ *       这一层是补出来的：原先想更新一篇文档，只能 {@code clear()} 整库再重灌。</li>
  *   <li><b>生成类（经过大模型）</b>：{@code /stage8/chat}。
  *       在检索之上叠加 Prompt 增强与生成。</li>
  * </ol>
@@ -58,6 +63,20 @@ import org.springframework.web.bind.annotation.RestController;
  * {@code @PathVariable(required = false)} 拿到 null 时落到默认库）。
  * 之所以保留旧路径：单库时代的 curl / 脚本 / 文档都不必改，
  * <b>而「升级一次就作废用户所有既有命令」是很差劲的体验</b>。
+ *
+ * <p>也有两处<b>没法</b>用「双路径模板」照搬，各自用了不同的办法，值得留意：
+ * <ul>
+ *   <li>{@code DELETE /stage8/kb}（清空）—— 它的老形式本来就是「没有多余路径段」的，
+ *       再挂一个 {@code /kb/{kbId}} 会被「删库」占住，所以改用 {@code ?kbId=}：</li>
+ *   <li>{@code /stage8/chat} —— 签名先于多知识库存在，于是保留 {@code ?kbId=}
+ *       并另开一条路径写法 {@code /kb/{kbId}/chat}。</li>
+ * </ul>
+ * 共同点是：<b>新入口可以做加法，老签名的语义一个字都不动。</b>
+ *
+ * <h2>⚠️ 保留字：库 id 不能叫 {@code docs} / {@code search} / {@code stats} …</h2>
+ * 这些名字在 {@code /stage8/kb/} 下已经是固定路径段。若允许拿它们当库 id，
+ * 那个库就会「建得出来、却谁也访问不到」—— 请求会被字面量路径优先截走。
+ * 所以 {@code create} 会直接拒绝（见 {@code KnowledgeBaseRegistry.RESERVED_IDS}）。
  *
  * <h2>推荐体验路径：从「单库」走到「多库」</h2>
  * <pre>
@@ -154,6 +173,30 @@ public class Stage8RagController {
                 created.meta().createdAt(), true, 0, 0);
     }
 
+    @GetMapping("/kb/{kbId}")
+    @Operation(summary = "查看单个知识库",
+            description = "按 kbId 查这一个库：名称、备注、创建时间、目录、文档数、片段数。"
+                    + "和 GET /stage8/kb（列出全部）的分工是「只关心一个库」时不必自己去数组里翻。"
+                    + "注意 kbId 若是 search / stats / docs 这类保留字，请求会被那批固定接口接走 —— "
+                    + "所以建库时这些名字是禁止的（见「创建知识库」的说明）。")
+    public KbDetail detail(@PathVariable String kbId) {
+        KnowledgeBase kb = registry.get(kbId);
+        Stats snapshot = kb.stats();
+        return new KbDetail(kb.id(), snapshot.name(), snapshot.description(), snapshot.createdAt(),
+                kb.dir().toString(), snapshot.documents(), snapshot.chunks(), snapshot.storeFileExists());
+    }
+
+    @PutMapping("/kb/{kbId}")
+    @Operation(summary = "更新知识库的名称 / 备注",
+            description = "补的是 CRUD 里缺的那个 U —— 这个接口出现之前，库名建完就改不了了。"
+                    + "name 与 description 都是「<b>不传就不改</b>」：只改其中一个时另一个可以整个省略，"
+                    + "不必先读出来再原样写回（那正是并发下最容易丢更新的写法）。"
+                    + "想清空备注请显式传空串。id 不能改 —— 它同时是磁盘目录名与账本主键。")
+    public KbDetail update(@PathVariable String kbId, @RequestBody UpdateKbRequest request) {
+        registry.update(kbId, request.name(), request.description());
+        return detail(kbId);
+    }
+
     @DeleteMapping("/kb/{kbId}")
     @Operation(summary = "删除知识库（连同它的目录）",
             description = "注意与下面的「清空」区分：<b>删除是连库带数据一起没了</b>，"
@@ -174,12 +217,25 @@ public class Stage8RagController {
     @PostMapping({"/kb/ingest", "/kb/{kbId}/ingest"})
     @Operation(summary = "把一段文本切块并写入知识库",
             description = "链路：原文 →（标题拼进正文）→ TokenTextSplitter 切块 → 逐块嵌入 → 该库自己的向量库。"
-                    + "不传 kbId 时写入默认库。返回每个片段在原文中的序号与总块数，用于判断切块粒度。")
+                    + "不传 kbId 时写入默认库。返回每个片段在原文中的序号与总块数，用于判断切块粒度。"
+                    + "<p><b>默认是追加（append）</b>：同一篇内容灌两次会得到两份。"
+                    + "想覆盖请传 <code>mode=upsert</code> —— 它按 <code>source</code> 定位、先删后入，"
+                    + "所以<b>必须给一个唯一的 source</b>，否则会连同其它 source 相同的文档一起删掉。"
+                    + "更精确的「只改这一篇」请用 PUT /stage8/kb/{kbId}/docs/{docId}。")
     public IngestRecord ingest(@PathVariable(required = false) String kbId,
+                               @Parameter(description = "append（追加，默认）或 upsert（按 source 覆盖）",
+                                       example = "append")
+                               @RequestParam(required = false, defaultValue = "append") String mode,
                                @Valid @RequestBody IngestRequest request) {
+        if (!"append".equalsIgnoreCase(mode) && !"upsert".equalsIgnoreCase(mode)) {
+            throw new IllegalArgumentException("mode 只支持 append（追加，默认）或 upsert（按 source 覆盖），"
+                    + "收到：" + mode);
+        }
         KnowledgeBase kb = registry.get(kbId);
-        return kb.ingest(request.title(), request.content(),
-                request.source() == null || request.source().isBlank() ? "api" : request.source());
+        String source = request.source() == null || request.source().isBlank() ? "api" : request.source();
+        return "upsert".equalsIgnoreCase(mode)
+                ? kb.upsertBySource(request.title(), request.content(), source)
+                : kb.ingest(request.title(), request.content(), source);
     }
 
     @PostMapping({"/kb/ingest-sample", "/kb/{kbId}/ingest-sample"})
@@ -218,19 +274,35 @@ public class Stage8RagController {
     }
 
     @DeleteMapping("/kb")
-    @Operation(summary = "清空【默认知识库】（兼容单库时代的老接口）",
-            description = "删除默认库的全部向量与清单，但保留库本身。"
-                    + "指定别的库请用 DELETE /stage8/kb/{kbId}/clear；"
-                    + "想连库一起删掉用 DELETE /stage8/kb/{kbId}。")
-    public Map<String, Object> clearDefault() {
-        return clear(null);
+    @Operation(summary = "清空知识库的内容（保留库）",
+            description = "把库腾空，但库本身（id / 名称 / 目录）都还在，可以立刻重新入库。"
+                    + "<p>这个路径同时支持两种写法："
+                    + "<code>DELETE /stage8/kb</code> 清空<b>默认库</b>（单库时代的老接口，行为一如既往），"
+                    + "<code>DELETE /stage8/kb?kbId=kb1</code> 清空<b>指定库</b>。"
+                    + "<p>为什么要让老接口也能带 kbId：其它接口用路径段表达库标识"
+                    + "（<code>/kb/{kbId}/ingest</code>），而清空这条路的老形式是 "
+                    + "<code>DELETE /kb</code> —— 它<b>没有多余的路径段可放库标识</b>。"
+                    + "如果只认 <code>/kb/{kbId}/clear</code>，客户端里那份「拼 baseUrl + /kb」的代码"
+                    + "就只能整个重写。用 query 参数是为了不动已有调用：不传参数的请求行为完全不变。"
+                    + "<p>连库一起删用 DELETE /stage8/kb/{kbId}。")
+    public Map<String, Object> clearByQuery(
+            @Parameter(description = "知识库 id，不传则清空默认库", example = "kb1")
+            @RequestParam(required = false) String kbId) {
+        return doClear(kbId);
     }
 
     @DeleteMapping("/kb/{kbId}/clear")
-    @Operation(summary = "清空指定知识库的内容（保留库）",
-            description = "把库腾空，但 id / 名称 / 目录都还在，可以立刻重新入库。"
-                    + "想连库一起删掉用 DELETE /stage8/kb/{kbId}。")
-    public Map<String, Object> clear(@PathVariable(required = false) String kbId) {
+    @Operation(summary = "清空指定知识库的内容（保留库，路径写法）",
+            description = "与 <code>DELETE /stage8/kb?kbId={kbId}</code> 完全等价，只是把库标识放进路径。"
+                    + "两种写法都留着，是因为「走路径还是走 query」在不同客户端里各有顺手之处，"
+                    + "而多支持一个入口的代价只有十行。"
+                    + "连库一起删用 DELETE /stage8/kb/{kbId}。")
+    public Map<String, Object> clear(@PathVariable String kbId) {
+        return doClear(kbId);
+    }
+
+    /** 清空的公共实现：query 写法与路径写法共用。 */
+    private Map<String, Object> doClear(String kbId) {
         KnowledgeBase kb = registry.get(kbId);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("knowledgeBase", kb.id());
@@ -256,6 +328,92 @@ public class Stage8RagController {
     }
 
     // ==================================================================
+    // 2.5 文档级增删改查（先拿 docId，再精确操作「一篇」）
+    // ==================================================================
+    //
+    // 为什么需要这一层：上面那节的操作粒度是「整库」——
+    // 想改一篇文档，只能 clear() 整库再重灌。
+    // 这一节把粒度降到「一篇」，同时把「按来源批量」也补齐。
+    //
+    // 两种定位方式的分工：
+    //   · docId  —— 精确到一篇（PUT / DELETE 单个），从下面的 /docs 列表里取
+    //   · source —— 按来源批量（DELETE 一批，或 upsert 覆盖）
+
+    @GetMapping({"/kb/docs", "/kb/{kbId}/docs"})
+    @Operation(summary = "列出知识库里的全部文档",
+            description = "每项含 docId / 标题 / 来源 / 块数 / 入库时间。"
+                    + "<b>docId 是后续查 / 改 / 删这一篇的唯一凭据</b>，先从这里拿。"
+                    + "它是不透明字符串（别手工拼、也别假设格式）—— "
+                    + "真实项目里换成 MySQL 的业务主键即可，调用方拿到的用法完全一样。")
+    public List<DocBrief> listDocs(@PathVariable(required = false) String kbId) {
+        return registry.get(kbId).docs();
+    }
+
+    @GetMapping({"/kb/docs/{docId}", "/kb/{kbId}/docs/{docId}"})
+    @Operation(summary = "查看一篇文档",
+            description = "返回元信息 + 它被切成了哪几块（块 id 与序号）。"
+                    + "<b>返回里没有片段正文</b> —— 不是漏写，是 {@code VectorStore} 接口"
+                    + "根本没有 get(id)，它只有 add / delete / similaritySearch。"
+                    + "「向量库是检索引擎，不是能随便读写的数据库」这件事，"
+                    + "这个接口的字段就是最直接的体现；要回显原文只能自己另存一份"
+                    + "（L2 要补的 MySQL 正文表）。"
+                    + "临时想看某篇的正文，可以用检索接口：把标题当 query 搜本库。")
+    public DocDetail docDetail(@PathVariable(required = false) String kbId,
+                               @Parameter(description = "文档 id，取自 GET /stage8/kb/{kbId}/docs")
+                               @PathVariable String docId) {
+        return registry.get(kbId).doc(docId);
+    }
+
+    @PutMapping({"/kb/docs/{docId}", "/kb/{kbId}/docs/{docId}"})
+    @Operation(summary = "覆盖更新一篇文档（docId 保持不变）",
+            description = "删掉这篇的全部旧片段，用新正文重新切块入库，<b>docId 不变</b> —— "
+                    + "所以对调用方是幂等的：拿同一个 docId 反复 PUT，库里始终只有一篇。"
+                    + "<p>title 可以不传（沿用原标题）；<b>content 必传</b>："
+                    + "标题是拼进正文一起嵌入的，而正文原文并不由向量库保存，"
+                    + "所以「只改标题不重灌正文」在当前实现里做不到。")
+    public IngestRecord updateDoc(@PathVariable(required = false) String kbId,
+                                  @Parameter(description = "文档 id，取自 GET /stage8/kb/{kbId}/docs")
+                                  @PathVariable String docId,
+                                  @Valid @RequestBody UpdateDocRequest request) {
+        return registry.get(kbId).replaceDoc(docId, request.title(), request.content());
+    }
+
+    @DeleteMapping({"/kb/docs/{docId}", "/kb/{kbId}/docs/{docId}"})
+    @Operation(summary = "删除一篇文档",
+            description = "只删这一篇（连同它的片段），库里其它文档原样不动。"
+                    + "整库腾空请用 DELETE /stage8/kb/{kbId}/clear，"
+                    + "连库一起删用 DELETE /stage8/kb/{kbId} —— 三个删除接口的粒度依次变大。")
+    public Map<String, Object> deleteDoc(@PathVariable(required = false) String kbId,
+                                         @Parameter(description = "文档 id，取自 GET /stage8/kb/{kbId}/docs")
+                                         @PathVariable String docId) {
+        KnowledgeBase kb = registry.get(kbId);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("knowledgeBase", kb.id());
+        result.put("docId", docId);
+        result.put("removedChunks", kb.deleteDoc(docId));
+        return result;
+    }
+
+    @DeleteMapping({"/kb/docs", "/kb/{kbId}/docs"})
+    @Operation(summary = "按来源删除文档（一批）",
+            description = "删掉某个 source 下的全部文档与片段。"
+                    + "典型用途：内置示例语料（source 就是文件名）、"
+                    + "或「某批外部推送的数据整个作废」。"
+                    + "<b>source 必传</b> —— 不传就等于清空整库，那是另一个接口的语义，"
+                    + "不应该在这里悄悄发生。")
+    public Map<String, Object> deleteDocsBySource(@PathVariable(required = false) String kbId,
+                                                  @Parameter(description = "来源标识，例：01-员工手册.md",
+                                                          example = "01-员工手册.md")
+                                                  @RequestParam String source) {
+        KnowledgeBase kb = registry.get(kbId);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("knowledgeBase", kb.id());
+        result.put("source", source);
+        result.put("removedChunks", kb.deleteBySource(source));
+        return result;
+    }
+
+    // ==================================================================
     // 3. 带检索的问答（经过大模型）
     // ==================================================================
 
@@ -263,13 +421,29 @@ public class Stage8RagController {
     @Operation(summary = "RAG 问答（已挂 QuestionAnswerAdvisor）",
             description = "链路：提问 → 该库的向量检索 topK → 把片段拼进 Prompt → DeepSeek 生成。"
                     + "kbId 不传则用默认库。控制台日志里能看到完整 Prompt，"
-                    + "也就是「模型到底拿到了什么资料」。")
+                    + "也就是「模型到底拿到了什么资料」。"
+                    + "<p>库标识走 <code>?kbId=</code>；等价的路径写法是 "
+                    + "<code>GET /stage8/kb/{kbId}/chat</code>。"
+                    + "这里之所以兼有 query 形式，是因为它的签名<b>先于多知识库存在</b> —— "
+                    + "改签名会让所有既有调用方一起失效，而多加一个入口不影响任何人。")
     public String chat(
             @Parameter(description = "用户提问", example = "追光科技的年假是怎么规定的？")
             @RequestParam String message,
             @Parameter(description = "知识库 id，不传用默认库", example = "kb1")
             @RequestParam(required = false) String kbId) {
-        return ragClientFor(registry.get(kbId)).prompt().user(message).call().content();
+        return answer(kbId, message);
+    }
+
+    @GetMapping("/kb/{kbId}/chat")
+    @Operation(summary = "RAG 问答（库标识走路径）",
+            description = "与 <code>GET /stage8/chat?kbId={kbId}</code> 完全等价，"
+                    + "只是把库标识放进路径 —— 与 /kb/{kbId}/search、/kb/{kbId}/stats 风格统一。")
+    public String chatInBase(
+            @Parameter(description = "知识库 id", example = "kb1")
+            @PathVariable String kbId,
+            @Parameter(description = "用户提问", example = "追光科技的年假是怎么规定的？")
+            @RequestParam String message) {
+        return answer(kbId, message);
     }
 
     @GetMapping("/chat/compare")
@@ -284,6 +458,28 @@ public class Stage8RagController {
             @RequestParam String message,
             @Parameter(description = "知识库 id，不传用默认库", example = "kb1")
             @RequestParam(required = false) String kbId) {
+        return doCompare(kbId, message);
+    }
+
+    @GetMapping("/kb/{kbId}/chat/compare")
+    @Operation(summary = "对照实验（库标识走路径）",
+            description = "与 <code>GET /stage8/chat/compare?kbId={kbId}</code> 完全等价，"
+                    + "把库标识放进路径。")
+    public CompareResult compareInBase(
+            @Parameter(description = "知识库 id", example = "kb1")
+            @PathVariable String kbId,
+            @Parameter(description = "用户提问", example = "值班补贴多少钱一天？")
+            @RequestParam String message) {
+        return doCompare(kbId, message);
+    }
+
+    /** 问答的公共实现：query 写法与路径写法共用。 */
+    private String answer(String kbId, String message) {
+        return ragClientFor(registry.get(kbId)).prompt().user(message).call().content();
+    }
+
+    /** 对照实验的公共实现：query 写法与路径写法共用。 */
+    private CompareResult doCompare(String kbId, String message) {
         KnowledgeBase kb = registry.get(kbId);
         List<Hit> hits = kb.searchAsHits(message, null, null);
 
@@ -356,6 +552,35 @@ public class Stage8RagController {
 
             @Schema(description = "备注，纯给人看", example = "只放产品线 A 的资料")
             String description) {
+    }
+
+    /**
+     * 更新知识库请求。两个字段都是「不传就不改」——
+     * 只改其中一个时另一个可以整个省略，不必「先读出来再原样写回」。
+     */
+    public record UpdateKbRequest(
+            @Schema(description = "新的显示名；不传或空白表示保持原名", example = "知识库1（已改名）")
+            String name,
+
+            @Schema(description = "新的备注；不传表示保持原备注，传空串则清空", example = "只放 A 线资料")
+            String description) {
+    }
+
+    /** 覆盖更新一篇文档的请求。 */
+    public record UpdateDocRequest(
+            @Schema(description = "新标题；不传或空白表示沿用原标题",
+                    example = "差旅报销补充说明（2026 修订）")
+            String title,
+
+            @NotBlank(message = "content 不能为空")
+            @Schema(description = "新的正文。<b>必传</b> —— 正文原文不由向量库保存，无法只改标题",
+                    example = "出差住宿标准：一线城市 700 元/晚。")
+            String content) {
+    }
+
+    /** 单个知识库的详情（切块与检索参数不在这里，那些看 /stats）。 */
+    public record KbDetail(String id, String name, String description, String createdAt,
+                           String dir, int documents, int chunks, boolean storeFileExists) {
     }
 
     /** 入库请求。 */
