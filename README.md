@@ -83,53 +83,70 @@ mvn spring-boot:run
 mvn test
 ```
 
-### 4. 打开接口文档（Swagger UI）
+### 4. 打开自带前端
 
 启动后访问：
 
 | 入口 | 地址 | 说明 |
 |---|---|---|
-| **接口实验室** | http://localhost:8080/index.html | **本项目自带的前端**，点一下就能调接口、看结果、读讲解（见下节） |
+| **智能助手**（主入口） | http://localhost:8080/ | 选一个场景直接对话，不同场景背后是不同的接口（见下节） |
+| 接口实验室 | http://localhost:8080/lab.html | 逐个接口调试：每个端点一张卡片，适合对照参数与返回 |
 | Swagger UI | http://localhost:8080/swagger-ui/index.html | 可视化界面，可直接「Try it out」 |
 | OpenAPI JSON | http://localhost:8080/v3/api-docs | 机器可读，喂给 Postman / Apifox / 代码生成器 |
 
 > 换了端口就把 `8080` 换掉；`OpenApiConfig` 里声明的 `servers` 只是给「Try it out」用的默认目标地址，不影响文档本身的生成。
 
-### 5. 打开接口实验室（自带前端，零构建）
+### 5. 智能助手：选场景 = 换接口
 
-启动后直接访问 <http://localhost:8080/>（根路径就是它），**不需要 npm install、不需要 build、不依赖任何外网 CDN**。整套前端就是 `src/main/resources/static/` 下的几个静态文件，由 Spring Boot 直接托管。
+根路径是一个**对话式助手**：左侧选一个阶段（场景），主区就是聊天框，发出去的消息会打到该场景绑定的接口上。
+
+**不需要 npm install、不需要 build、不依赖任何外网 CDN** —— 整套前端就是 `src/main/resources/static/` 下的静态文件，由 Spring Boot 直接托管。
 
 ```text
 src/main/resources/static/
-├── index.html              页面骨架：顶栏 + 阶段导航 + 主区
+├── index.html              智能助手（对话式）
+├── lab.html                接口实验室（逐个端点调试）
 └── assets/
-    ├── app.css             全部样式
-    ├── core.js             请求封装 / 表单生成 / JSON 折叠视图
-    ├── registry.js         接口的声明式描述 ← 想加接口只改这里
-    ├── renderers.js        富结果渲染（检索命中、对照实验、文档清单…）
-    └── app.js              主驱动：把声明渲染成可交互页面
+    ├── chat.css            助手的样式
+    ├── chat-core.js        请求封装 / SSE 手工解析 / Markdown 渲染
+    ├── chat-stages.js      ★ 场景声明：每个 stage 绑定哪个接口、有哪些参数、怎么渲染  ← 想加场景只改这里
+    ├── chat-app.js         主驱动：导航 + 配置条 + 对话流
+    ├── app.css / core.js / registry.js / renderers.js / app.js   接口实验室的样式与逻辑
 ```
 
-它解决的是 Swagger UI 在这个项目里最不好用的三点：
+场景与接口的对应关系：
 
-1. **中文参数**
-   Swagger 的 Try it out 和 curl 都要手工处理编码；实验室里参数由表单控件收集，浏览器统一按 UTF-8 发出，不会撞上 Git Bash 传中文被转 GBK 那个坑。
-2. **「这个接口到底在学什么」**
-   每个接口卡片里都有一段教学说明（这个接口在做什么 / 该看结果的哪一部分），并且结果不是一坨 JSON，而是按语义渲染：检索命中带相似度条、知识库列表带「设为当前库」按钮、对照实验并排显示两版回答。
-3. **多库上下文**
-   页面上有一个全局的「当前知识库」选择器，所有带 `{kbId}` 的接口自动替换——不必每次手工拼 URL。
+| 场景 | 绑定接口 | 说明 |
+|---|---|---|
+| 1 基础对话 | `GET /stage1/chat`、`/stage1/chat/template`、`/stage1/stream` | 可切「流式输出」，SSE 真逐字渲染 |
+| 2 会话记忆 | `GET /stage2/chat` + `history` / `history/size` | 会话 ID 可改；一键看记忆条数、清空记忆 |
+| 3 工具调用 | `GET /stage3/chat` | 时间 / 日期推算 / 指数行情三个工具 |
+| 4 Advisor 链 | `GET /stage4/chat` | 价值在控制台日志（Timing 外层、ToolLoop 内层） |
+| 5 结构化输出 | `GET /stage5/analyze`、`/analyze/validated` | 输入区是「指数选择器」；可切自纠错校验 |
+| 6 多工具披露 | `GET /stage6/chat` | 13 个 CRM 工具，按会话缓存索引 |
+| 6L 检索策略实验 | `GET /stage6/lab/{search,compare,catalog,chat}` | **纯检索不调模型**：单策略 / 四策略对比 / 工具画像 |
+| 7 MCP 工具 | `GET /stage7/chat`、`/stage7/tools` | 默认未启用 → 404 属预期（用 `mcp` profile 启动） |
+| 8 RAG 问答 | `GET /stage8/kb/{kbId}/chat`、`/chat/compare` | 知识库选择器 + 对照实验；带「载入示例语料 / 库现状 / 列出文档 / 纯检索 / 新建库」动作 |
+| D 编码自检 | `GET /diagnostics/encoding/{json,text}` | 不花 token 的链路自检 |
 
-几个顺手的用法：
+为什么值得用它而不是只用 Swagger：
+
+1. **中文参数** —— 参数由表单控件收集，浏览器统一按 UTF-8 发出，不会撞上「Git Bash 把中文转成 GBK」那个坑。
+2. **每条回复都带「这一屏在学什么」** —— 场景引导卡解释这一阶段的机制，回复下方标注实际打的接口、耗时、HTTP 状态；检索命中带相似度条、对照实验并排显示两版回答、结构化输出按字段渲染（趋势按 A 股口径涨红跌绿）。
+3. **一键动作** —— 「载入示例语料」「库现状」「工具画像」这类不该占用对话输入的操作放在配置条上，结果同样以「动作」卡片落进对话流。
+4. **错误会告诉你怎么修** —— 401/404/500/400 分别给出针对性提示（例如假 Key 时直接给出带真实 Key 的重启命令）。
+
+几个顺手的深链（也方便批量截图核对）：
 
 | 用法 | 说明 |
 |---|---|
-| `#ep-<id>` | 直接展开指定接口卡片，例如 `http://localhost:8080/#ep-search` |
-| `#ep-<id>!run` | 展开并自动执行一次，**只对 GET 生效**（避免一个链接就能删数据） |
-| `?shot=1` | 关掉吸顶布局，方便无头浏览器一次性截全页 |
+| `#scene=stage8` | 直接进某个场景，例如 `http://localhost:8080/#scene=stage8` |
+| `&run=1` | 顺便自动发送该场景的第一条示例问法 |
+| `&act=<n>` | 顺便执行第 n 个「动作」按钮（`n` 从 0 开始） |
+| `&cfg=mode:compare` | 覆盖场景参数，多个用逗号分隔 |
 
-目前只实现了 **Stage 8（RAG）** 的 19 个接口，按「库管理 / 入库与切片 / 检索 / RAG 问答 / 状态与持久化」分成 5 组学习路径。其余阶段在左侧导航里是置灰的「规划中」——加一个阶段只需要在 `registry.js` 里补一份声明，界面会自动长出来。
-
-> 其中第 3 组「检索」和第 2 组「入库」不经过大模型，**没有 API Key 也能完整验证**；第 4 组问答才需要真实的 `DEEPSEEK_API_KEY`。
+> 例：`http://localhost:8080/#scene=stage6lab&cfg=mode:compare&run=1` 打开就是四策略并排对比。
+> 不需要大模型的组合：`6L` 的三个模式、`8` 的纯检索与库管理动作、`D` 编码自检 —— **没有 API Key 也能完整验证**；其余场景都需要真实的 `DEEPSEEK_API_KEY`。
 
 ---
 

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spring AI Agent Lab · 接口实验室</title>
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">AI</span>
+    <div class="brand-text">
+      <h1>Spring AI Agent Lab</h1>
+      <p>接口实验室 · 点一下就能看到每个接口在做什么</p>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div class="health" id="health">
+      <span class="dot dot-wait"></span>
+      <span class="health-text">正在探测后端…</span>
+    </div>
+    <a class="link-btn" href="swagger-ui.html" target="_blank" rel="noopener" title="框架自带的接口文档">Swagger</a>
+    <a class="link-btn" href="v3/api-docs" target="_blank" rel="noopener" title="原始 OpenAPI 描述">OpenAPI</a>
+  </div>
+</header>
+
+<div class="shell">
+
+  <aside class="sidebar">
+    <div class="sidebar-title">学习阶段</div>
+    <nav id="stageNav" class="stage-nav"></nav>
+    <div class="sidebar-foot">
+      <div class="hint-card">
+        <div class="hint-title">同源调用</div>
+        <p>页面由 Spring Boot 直接托管，请求走同源，不需要跨域配置，也不会撞上 Git Bash 传中文变 GBK 那个坑。</p>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main" id="main">
+    <div class="placeholder">
+      <h2>选择一个阶段开始</h2>
+      <p>当前已实现 Stage 8（RAG 知识库）。</p>
+    </div>
+  </main>
+
+</div>
+
+<div id="toasts" class="toasts"></div>
+
+<script src="assets/core.js"></script>
+<script src="assets/registry.js"></script>
+<script src="assets/renderers.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

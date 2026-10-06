@@ -3,56 +3,79 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Spring AI Agent Lab · 接口实验室</title>
-<link rel="stylesheet" href="assets/app.css">
+<title>Spring AI Agent Lab · 智能助手</title>
+<link rel="stylesheet" href="assets/chat.css">
 </head>
 <body>
 
-<header class="topbar">
-  <div class="brand">
-    <span class="brand-mark">AI</span>
-    <div class="brand-text">
-      <h1>Spring AI Agent Lab</h1>
-      <p>接口实验室 · 点一下就能看到每个接口在做什么</p>
-    </div>
-  </div>
-  <div class="topbar-right">
-    <div class="health" id="health">
-      <span class="dot dot-wait"></span>
-      <span class="health-text">正在探测后端…</span>
-    </div>
-    <a class="link-btn" href="swagger-ui.html" target="_blank" rel="noopener" title="框架自带的接口文档">Swagger</a>
-    <a class="link-btn" href="v3/api-docs" target="_blank" rel="noopener" title="原始 OpenAPI 描述">OpenAPI</a>
-  </div>
-</header>
+<div class="app">
 
-<div class="shell">
-
-  <aside class="sidebar">
-    <div class="sidebar-title">学习阶段</div>
-    <nav id="stageNav" class="stage-nav"></nav>
-    <div class="sidebar-foot">
-      <div class="hint-card">
-        <div class="hint-title">同源调用</div>
-        <p>页面由 Spring Boot 直接托管，请求走同源，不需要跨域配置，也不会撞上 Git Bash 传中文变 GBK 那个坑。</p>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">AI</span>
+      <div class="brand-text">
+        <h1>Spring AI Agent Lab</h1>
+        <p>选一个场景，直接对话</p>
       </div>
     </div>
-  </aside>
-
-  <main class="main" id="main">
-    <div class="placeholder">
-      <h2>选择一个阶段开始</h2>
-      <p>当前已实现 Stage 8（RAG 知识库）。</p>
+    <div class="topbar-right">
+      <div class="health" id="health">
+        <span class="dot dot-wait"></span>
+        <span class="health-text">正在探测后端…</span>
+      </div>
+      <a class="link-btn" href="swagger-ui.html" target="_blank" rel="noopener">Swagger</a>
+      <a class="link-btn" href="v3/api-docs" target="_blank" rel="noopener">OpenAPI</a>
+      <a class="link-btn" href="lab.html" title="上一版：逐个接口调试的实验室页面">接口实验室</a>
     </div>
-  </main>
+  </header>
 
+  <div class="shell">
+
+    <aside class="rail">
+      <div class="rail-title">场景</div>
+      <nav class="scene-nav" id="sceneNav"></nav>
+      <div class="rail-foot">
+        <div class="hint-card">
+          <div class="hint-title">每个场景 = 一组接口</div>
+          <p>切换场景会换掉背后调用的接口，同时保留各自的对话。</p>
+        </div>
+        <div class="hint-card">
+          <div class="hint-title">同源直连</div>
+          <p>页面由 Spring Boot 托管，请求走同源，不需要跨域配置，中文参数也不会被终端转成 GBK。</p>
+        </div>
+      </div>
+    </aside>
+
+    <main class="stage">
+      <div class="stage-head">
+        <div class="stage-title">
+          <span class="stage-no" id="sceneNo">1</span>
+          <div class="stage-title-text">
+            <h2 id="sceneName">基础对话</h2>
+            <p id="sceneTagline">ChatClient 一问一答</p>
+          </div>
+        </div>
+        <div class="stage-endpoint" id="sceneEndpoint"></div>
+      </div>
+
+      <div class="stage-config" id="sceneConfig"></div>
+
+      <div class="chat" id="chat"></div>
+
+      <div class="composer">
+        <div class="chips" id="chips"></div>
+        <div class="composer-body" id="composerBody"></div>
+        <div class="composer-foot" id="composerFoot"></div>
+      </div>
+    </main>
+
+  </div>
 </div>
 
 <div id="toasts" class="toasts"></div>
 
-<script src="assets/core.js"></script>
-<script src="assets/registry.js"></script>
-<script src="assets/renderers.js"></script>
-<script src="assets/app.js"></script>
+<script src="assets/chat-core.js"></script>
+<script src="assets/chat-stages.js"></script>
+<script src="assets/chat-app.js"></script>
 </body>
 </html>
