@@ -84,6 +84,11 @@ window.C = (function () {
       init.headers['Content-Type'] = 'application/json;charset=UTF-8';
       init.body = JSON.stringify(opts.json);
     }
+    if (opts.form !== undefined) {
+      // 文件上传。千万不要手写 Content-Type —— multipart 的 boundary 由浏览器生成，
+      // 手写必然漏掉 boundary，服务端会解析不出任何 part（表现为「没有收到文件」）。
+      init.body = opts.form;
+    }
     var t0 = performance.now();
     var res;
     try {

@@ -126,7 +126,7 @@ src/main/resources/static/
 | 6 多工具披露 | `GET /stage6/chat` | 13 个 CRM 工具，按会话缓存索引 |
 | 6L 检索策略实验 | `GET /stage6/lab/{search,compare,catalog,chat}` | **纯检索不调模型**：单策略 / 四策略对比 / 工具画像 |
 | 7 MCP 工具 | `GET /stage7/chat`、`/stage7/tools` | 默认未启用 → 404 属预期（用 `mcp` profile 启动） |
-| 8 RAG 问答 | `GET /stage8/kb/{kbId}/chat`、`/chat/compare` | 知识库选择器 + 对照实验；带「载入示例语料 / 库现状 / 列出文档 / 纯检索 / 新建库」动作 |
+| 8 RAG 问答 | `GET /stage8/kb/{kbId}/chat`、`/chat/compare` | 知识库选择器 + 对照实验；带「上传 md 文档 / 新建知识库 / 载入示例语料 / 库现状 / 列出文档 / 纯检索」动作 |
 | D 编码自检 | `GET /diagnostics/encoding/{json,text}` | 不花 token 的链路自检 |
 
 为什么值得用它而不是只用 Swagger：
@@ -401,6 +401,11 @@ curl --noproxy '*' "http://localhost:8090/stage8/chat?message=追光科技的年
 # ② 一键载入内置示例语料（resources/rag/*.md，3 篇虚构企业文档）
 curl --noproxy '*' -X POST "http://localhost:8090/stage8/kb/ingest-sample"
 
+# ②' 或者灌你自己的 md（表单字段名是 files，可写多个 -F 一次传多篇）
+#     ⚠️ 文件名走命令行时，中文名会被 Git Bash 转成 GBK —— 要么改成英文名，
+#        要么直接用前端智能助手的「上传 md 文档」（浏览器发出去的一定是 UTF-8）
+curl --noproxy '*' -X POST "http://localhost:8090/stage8/kb/default/upload" -F "files=@./handbook.md"
+
 # ③ 看检索层命中了什么 —— 这个接口不经过大模型，结果完全可复现
 curl --noproxy '*' "http://localhost:8090/stage8/kb/search?query=%E5%B9%B4%E5%81%87%E6%9C%89%E5%87%A0%E5%A4%A9"
 
@@ -428,6 +433,7 @@ curl --noproxy '*' "http://localhost:8090/stage8/chat/compare?message=%E5%80%BC%
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/stage8/kb/{kbId}/ingest` | 传 `{title, content, source?}` 切块入库。**默认追加**；加 `?mode=upsert` 才按 `source` 覆盖 |
+| POST | `/stage8/kb/{kbId}/upload` | **上传 `.md` 文件入库**（`multipart/form-data`，字段名 `files`，可多选）。`source` 取文件名，所以 `mode=upsert` 的语义是「同名文件覆盖那一篇」。响应里带每个片段的**正文预览**（前 120 字）——这是唯一能看到「原文被切成了什么样」的地方 |
 | POST | `/stage8/kb/{kbId}/ingest-sample` | 载入 `resources/rag/*.md`（幂等，可重复调用） |
 | GET | `/stage8/kb/{kbId}/search` | **纯向量检索，不调模型**（可选 `topK` / `threshold`） |
 | GET | `/stage8/kb/{kbId}/stats` | 文档数、块数、维度、参数、落盘状态、清单 |

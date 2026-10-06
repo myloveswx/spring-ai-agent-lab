@@ -218,6 +218,65 @@ code { font-family: var(--mono); font-size: 0.92em; background: var(--bg-code); 
 .act-btn:hover { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
 .act-btn:disabled { opacity: .5; cursor: default; }
 
+/* ---- 需要填参数的动作：点按钮才展开表单，首屏仍能一眼扫完所有动作 ---- */
+.act-form-slot { display: inline-flex; flex-direction: column; align-items: flex-start; }
+.act-form {
+  margin-top: 8px; padding: 11px 12px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-surface);
+  display: flex; flex-direction: column; gap: 9px;
+  min-width: 300px;
+}
+.act-form-row { display: flex; flex-direction: column; gap: 4px; }
+.act-form-row > label { font-size: 11px; font-weight: 600; color: var(--text-3); }
+.act-form-row input[type="text"], .act-form-row select {
+  font: inherit; font-size: 12px; padding: 6px 9px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg); color: var(--text); min-width: 240px;
+}
+.act-form-row input[type="text"]:focus, .act-form-row select:focus { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+.act-form-row input[type="file"] { font-size: 11.5px; color: var(--text-2); }
+.act-hint { font-size: 10.5px; color: var(--text-3); line-height: 1.45; }
+.act-form-actions { display: flex; gap: 7px; margin-top: 2px; }
+.act-go {
+  font: inherit; font-size: 11.5px; padding: 5px 13px; border-radius: 999px;
+  border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer;
+}
+.act-go:hover { filter: brightness(1.08); }
+.act-go:disabled { opacity: .5; cursor: default; }
+.act-cancel {
+  font: inherit; font-size: 11.5px; padding: 5px 11px; border-radius: 999px;
+  border: 1px solid var(--line-strong); background: var(--bg-surface);
+  color: var(--text-3); cursor: pointer;
+}
+.act-cancel:hover { color: var(--text-2); }
+
+/* ---- 上传入库的三步链路：切片 → 向量化 → 存入内存 ---- */
+.pipe-flow { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 11px; }
+.pipe-step {
+  flex: 1 1 150px; min-width: 0;
+  padding: 8px 10px; border-radius: var(--r-sm);
+  border: 1px solid var(--line); background: var(--bg-code);
+}
+.pipe-step b { display: block; font-size: 11.5px; margin-bottom: 2px; }
+.pipe-step span { display: block; font-size: 10.5px; color: var(--text-3); line-height: 1.45; }
+.pipe-doc {
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: 9px 11px; margin-bottom: 8px; background: var(--bg-surface);
+}
+.pipe-doc-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 12.5px; }
+.pipe-details { margin-top: 7px; }
+.pipe-details summary { font-size: 11px; color: var(--accent); cursor: pointer; user-select: none; }
+.pipe-chunks { margin-top: 7px; display: flex; flex-direction: column; gap: 6px; }
+.pipe-chunk { border-left: 2px solid var(--accent-line); padding-left: 9px; }
+.pipe-chunk-head { display: flex; gap: 8px; align-items: baseline; margin-bottom: 2px; }
+.pipe-chunk-idx { font-family: var(--mono); font-size: 10.5px; font-weight: 700; color: var(--accent); }
+.pipe-chunk-text { font-size: 11.5px; color: var(--text-2); line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.pipe-skip {
+  font-size: 11.5px; color: var(--text-2); padding: 8px 10px;
+  border: 1px dashed var(--line-strong); border-radius: var(--r-sm); background: var(--bg-code);
+}
+
 /* ------------------------------------------------------------------ 对话 --- */
 
 .chat {

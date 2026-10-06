@@ -1,7 +1,12 @@
 package com.agentlab.stage8;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.NoSuchElementException;
 
@@ -25,6 +30,7 @@ import jakarta.validation.constraints.NotBlank;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.document.Document;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -38,6 +44,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 
 /**
  * Stage 8 —— RAG 知识库（L1 朴素 RAG，支持多知识库）。
@@ -236,6 +243,149 @@ public class Stage8RagController {
         return "upsert".equalsIgnoreCase(mode)
                 ? kb.upsertBySource(request.title(), request.content(), source)
                 : kb.ingest(request.title(), request.content(), source);
+    }
+
+    @PostMapping({"/kb/upload", "/kb/{kbId}/upload"})
+    @Operation(summary = "上传 .md 文件入库（切片 → 向量化 → 存入内存）",
+            description = "比 /ingest 多两件事：<b>收文件</b>，以及<b>把切片结果还给你</b>。"
+                    + "链路：文件 →（按 UTF-8 读，剥 BOM）→ 推标题 → 标题拼进正文 → 分词切块 "
+                    + "→ 逐块嵌入 → 写进该库自己的向量库。"
+                    + "<p>响应里的 <code>uploaded[].previews</code> 是每个片段的前 120 字 —— "
+                    + "这是唯一能看到「原文被切成了什么样」的地方：VectorStore 接口没有 get，"
+                    + "片段正文入库后就取不回来了。调 <code>agentlab.rag.chunk-size</code> 时对着它看最直观。"
+                    + "<p>标题取法：正文第一个 <code># 一级标题</code> 优先，否则用文件名（去扩展名）。"
+                    + "<p>source 固定取文件名，所以 <code>mode=upsert</code> 的语义是「同名文件覆盖那一篇」——"
+                    + "重复上传同一份资料不会越堆越多。<b>默认 append</b>，两次上传就是两份。"
+                    + "<p>只接受 .md / .markdown / .txt；其它后缀、空文件会出现在 <code>skipped</code> 里，"
+                    + "不影响同批次其它文件入库。")
+    public UploadResult upload(@PathVariable(required = false) String kbId,
+                               @Parameter(description = "append（追加，默认）或 upsert（按文件名覆盖）",
+                                       example = "append")
+                               @RequestParam(required = false, defaultValue = "append") String mode,
+                               @Parameter(description = "表单字段名固定为 files，可一次选多个")
+                               @RequestParam("files") MultipartFile[] files) {
+        if (!"append".equalsIgnoreCase(mode) && !"upsert".equalsIgnoreCase(mode)) {
+            throw new IllegalArgumentException("mode 只支持 append（追加，默认）或 upsert（按文件名覆盖），"
+                    + "收到：" + mode);
+        }
+        if (files == null || files.length == 0) {
+            throw new IllegalArgumentException("没有收到文件。这是 multipart/form-data 接口，"
+                    + "表单字段名必须是 files。");
+        }
+
+        KnowledgeBase kb = registry.get(kbId);
+        boolean upsert = "upsert".equalsIgnoreCase(mode);
+        long startedAt = System.currentTimeMillis();
+
+        List<UploadedDoc> uploaded = new ArrayList<>();
+        List<String> skipped = new ArrayList<>();
+
+        for (MultipartFile file : files) {
+            String filename = safeFilename(file.getOriginalFilename());
+
+            if (file.isEmpty()) {
+                skipped.add(filename + " —— 空文件");
+                continue;
+            }
+            if (!markdownLike(filename)) {
+                skipped.add(filename + " —— 只接受 .md / .markdown / .txt，这个是 " + extensionOf(filename));
+                continue;
+            }
+            String content = readUtf8(file);
+            if (content.isBlank()) {
+                skipped.add(filename + " —— 去掉空白后没有任何内容");
+                continue;
+            }
+
+            KnowledgeBase.DocIngest out = kb.ingestDetailed(titleOf(filename, content), content, filename, upsert);
+
+            List<Document> chunks = out.chunks();
+            List<ChunkPreview> previews = new ArrayList<>(chunks.size());
+            for (int i = 0; i < chunks.size(); i++) {
+                previews.add(previewOf(chunks.get(i), i));
+            }
+            uploaded.add(new UploadedDoc(out.record().id(), out.record().title(), filename,
+                    content.length(), chunks.size(), out.record().ingestedAt(), previews));
+        }
+
+        Stats stats = kb.stats();
+        return new UploadResult(stats.id(), files.length, uploaded.size(), skipped.size(),
+                uploaded.stream().mapToInt(UploadedDoc::chunks).sum(),
+                stats.dimensions(), System.currentTimeMillis() - startedAt,
+                uploaded, skipped, stats);
+    }
+
+    /** 只取文件名部分 —— 客户端可以把 {@code ../../evil.md} 塞进 originalFilename。 */
+    private static String safeFilename(String original) {
+        if (original == null || original.isBlank()) {
+            return "未命名.md";
+        }
+        String name = original.replace('\\', '/');
+        int slash = name.lastIndexOf('/');
+        return slash >= 0 ? name.substring(slash + 1) : name;
+    }
+
+    private static boolean markdownLike(String filename) {
+        String lower = filename.toLowerCase(Locale.ROOT);
+        return lower.endsWith(".md") || lower.endsWith(".markdown") || lower.endsWith(".txt");
+    }
+
+    private static String extensionOf(String filename) {
+        int dot = filename.lastIndexOf('.');
+        return dot < 0 ? "无后缀" : filename.substring(dot);
+    }
+
+    /**
+     * 标题取法：正文第一个非空行若是一级标题就用它，否则用文件名。
+     *
+     * <p>两者都合理，但优先级不能反 —— 文件的第一个 {@code #} 标题是作者写给人看的，
+     * 而文件名常被改成 {@code 新建文档(1).md} 这种。检索结果里显示「员工手册」
+     * 比显示「新建文档」有用得多。
+     */
+    private static String titleOf(String filename, String content) {
+        for (String line : content.split("\\R", -1)) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            if (trimmed.startsWith("#")) {
+                String heading = trimmed.replaceFirst("^#+\\s*", "").trim();
+                if (!heading.isEmpty()) {
+                    return heading;
+                }
+            }
+            break;   // 只看第一个有内容的行
+        }
+        int dot = filename.lastIndexOf('.');
+        return dot > 0 ? filename.substring(0, dot) : filename;
+    }
+
+    /**
+     * 按 UTF-8 读，并剥掉 BOM。
+     *
+     * <p>BOM 不是洁癖问题：Windows 记事本存出来的 UTF-8 文件开头带 {@code \uFEFF}，
+     * 不解掉的话第一行变成 {@code "\uFEFF# 员工手册"}，
+     * 既不匹配上面的一级标题规则，也会跟着标题一起被嵌进向量。
+     */
+    private static String readUtf8(MultipartFile file) {
+        try {
+            String text = new String(file.getBytes(), StandardCharsets.UTF_8);
+            return text.startsWith("\uFEFF") ? text.substring(1) : text;
+        } catch (IOException e) {
+            throw new UncheckedIOException("读取上传文件失败：" + file.getOriginalFilename(), e);
+        }
+    }
+
+    /** 片段预览正文保留的字符数。够看出「在哪断的」，又不至于让响应体爆掉。 */
+    private static final int PREVIEW_CHARS = 120;
+
+    private static ChunkPreview previewOf(Document chunk, int fallbackIndex) {
+        String text = chunk.getText() == null ? "" : chunk.getText();
+        // 序号取 metadata 里的，不是列表下标 —— chunk() 会跳过空白块，两者可能不等
+        Object raw = chunk.getMetadata().get(KnowledgeBase.META_CHUNK_INDEX);
+        int index = raw instanceof Number n ? n.intValue() : fallbackIndex;
+        return new ChunkPreview(index, text.length(),
+                text.length() > PREVIEW_CHARS ? text.substring(0, PREVIEW_CHARS) + "…" : text);
     }
 
     @PostMapping({"/kb/ingest-sample", "/kb/{kbId}/ingest-sample"})
@@ -595,6 +745,31 @@ public class Stage8RagController {
 
             @Schema(description = "来源标识，不传则为 api")
             String source) {
+    }
+
+    /**
+     * 上传入库的结果 —— 一次把「切片 / 向量化 / 存入」三步的产物都摊开。
+     *
+     * @param filesReceived 收到的文件数（含被跳过的）
+     * @param filesIngested 真正入成功了几篇
+     * @param filesSkipped  被跳过的数量（原因见 {@code skipped}，逐条说明）
+     * @param chunksAdded   本批新增的片段总数
+     * @param dimensions    向量维度（本地 bge-small-zh-v1.5 是 512）
+     * @param costMillis    本批总耗时，含读取 + 切块 + 嵌入 + 落盘
+     * @param stats         入库后的库现状，用来看「一共多少篇 / 多少块」
+     */
+    public record UploadResult(String knowledgeBase, int filesReceived, int filesIngested, int filesSkipped,
+                               int chunksAdded, int dimensions, long costMillis,
+                               List<UploadedDoc> uploaded, List<String> skipped, Stats stats) {
+    }
+
+    /** 一篇上传文档的切片明细。 */
+    public record UploadedDoc(String docId, String title, String source, int chars, int chunks,
+                              String ingestedAt, List<ChunkPreview> previews) {
+    }
+
+    /** 一个切片的预览：它在原文里的序号、字符数，以及开头那 120 个字。 */
+    public record ChunkPreview(int index, int chars, String text) {
     }
 
     /** 一次回答 + 耗时。 */

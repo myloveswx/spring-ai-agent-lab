@@ -159,6 +159,12 @@
     });
 
     (sc.actions || []).forEach(function (act) {
+      // 需要填参数的动作用内联表单：window.prompt 弹窗既不能选文件，
+      // 也没法预填默认值和做必填校验，「上传 md」「新建知识库」这类动作必须走表单。
+      if (act.form && act.form.length) {
+        box.appendChild(actionFormSlot(sc, act));
+        return;
+      }
       var btn = h('button', {
         class: 'act-btn', type: 'button', text: act.label,
         onclick: function () { runAction(sc, act); }
@@ -168,8 +174,82 @@
     });
   }
 
-  /** 一键动作：不占用对话输入，但结果照常落进对话流（带「动作」标签）。 */
-  async function runAction(sc, act) {
+  /** 带表单的动作：先放按钮，点开才展开表单 —— 首屏仍然一眼能扫完所有动作。 */
+  function actionFormSlot(sc, act) {
+    var wrap = h('div', { class: 'act-form-slot' });
+    var btn = h('button', {
+      class: 'act-btn', type: 'button', text: act.label,
+      onclick: function () { toggleActForm(sc, act, wrap); }
+    });
+    act._btn = btn;
+    wrap.appendChild(btn);
+    return wrap;
+  }
+
+  function toggleActForm(sc, act, wrap) {
+    var opened = wrap.querySelector('.act-form');
+    if (opened) { opened.remove(); return; }        // 再点一次收起
+    if (state.busy) { C.toast('上一个请求还在跑，稍等'); return; }
+
+    var fields = {};
+    var panel = h('div', { class: 'act-form' });
+
+    (act.form || []).forEach(function (f) {
+      if (f.showIf && !f.showIf(cfg(sc.id))) return;
+
+      var ctrl;
+      if (f.type === 'file') {
+        ctrl = h('input', { type: 'file', multiple: f.multiple !== false, accept: f.accept || '' });
+      } else if (f.type === 'select') {
+        ctrl = h('select', null, (f.options || []).map(function (o) {
+          return h('option', { value: o.value, selected: String(f.default) === String(o.value) }, o.label);
+        }));
+      } else {
+        // default 允许是函数：每次展开表单重新求值，才能给出「每次都不一样」的随机 id
+        var def = typeof f.default === 'function' ? f.default() : (f.default || '');
+        ctrl = h('input', { type: 'text', value: def, placeholder: f.placeholder || '' });
+      }
+      fields[f.key] = { spec: f, el: ctrl };
+      panel.appendChild(h('div', { class: 'act-form-row' }, [
+        h('label', { text: f.label + (f.required ? ' *' : '') }),
+        ctrl,
+        f.hint ? h('div', { class: 'act-hint', text: f.hint }) : null
+      ]));
+    });
+
+    var submit = h('button', {
+      class: 'act-go', type: 'button', text: act.submitLabel || '执行',
+      onclick: function () {
+        var values = {}, missing = null;
+        Object.keys(fields).forEach(function (k) {
+          var f = fields[k];
+          values[k] = f.spec.type === 'file'
+            ? Array.prototype.slice.call(f.el.files || [])
+            : f.el.value;
+          var empty = values[k] === '' || values[k] === null
+            || (Array.isArray(values[k]) && !values[k].length);
+          if (f.spec.required && empty && !missing) missing = f.spec.label;
+        });
+        if (missing) { C.toast('「' + missing + '」是必填的'); return; }
+        panel.remove();
+        runAction(sc, act, values);
+      }
+    });
+    var cancel = h('button', {
+      class: 'act-cancel', type: 'button', text: '取消',
+      onclick: function () { panel.remove(); }
+    });
+    panel.appendChild(h('div', { class: 'act-form-actions' }, [submit, cancel]));
+    wrap.appendChild(panel);
+  }
+
+  /**
+   * 一键动作：不占用对话输入，但结果照常落进对话流（带「动作」标签）。
+   *
+   * @param values 表单动作收集到的值：text/select 是字符串，file 是 File[]。
+   *               普通动作不传。
+   */
+  async function runAction(sc, act, values) {
     if (state.busy) { C.toast('上一个请求还在跑，稍等'); return; }
     var c = cfg(sc.id);
     var text = '';
@@ -177,7 +257,9 @@
       text = currentInputValue().trim();
       if (!text) { C.toast('这个动作要用输入框里的内容，先写点东西'); return; }
     }
-    var call = act.custom ? act.custom({ app: api, cfg: c, scene: sc }) : act.call(c, text);
+    var call = act.submit ? act.submit(values || {}, c, sc)
+             : act.custom ? act.custom({ app: api, cfg: c, scene: sc })
+             : act.call(c, text);
     if (!call) return;
 
     var conv = convOf(sc.id);
@@ -195,14 +277,14 @@
     scrollToEnd(true);
 
     state.busy = true; setBusyUi(true);
-    var res = await C.req(call.method, call.path, { query: call.query, json: call.json });
+    var res = await C.req(call.method, call.path, { query: call.query, json: call.json, form: call.form });
     state.busy = false; setBusyUi(false);
 
     C.clear(body);
     if (!res.ok) {
       body.appendChild(errorContent(C.errorInfo(res)));
     } else {
-      var node = (act.render && act.render(res, { app: api, cfg: c, scene: sc })) || genericContent(res);
+      var node = (act.render && act.render(res, { app: api, cfg: c, scene: sc, values: values })) || genericContent(res);
       body.appendChild(node);
       body.appendChild(h('div', { class: 'msg-meta', style: { marginTop: '8px', padding: '0' } }, [
         h('span', { text: C.fmtMs(res.ms) }),
@@ -294,7 +376,7 @@
   function setBusyUi(busy) {
     var btn = C.$('#sendBtn');
     if (btn) btn.disabled = busy;
-    document.querySelectorAll('.act-btn, .picker-btn').forEach(function (b) { b.disabled = busy; });
+    document.querySelectorAll('.act-btn, .act-go, .picker-btn').forEach(function (b) { b.disabled = busy; });
     var ta = C.$('#input');
     if (ta) ta.disabled = false;   // 输入框保持可打字，只是发不出去
   }

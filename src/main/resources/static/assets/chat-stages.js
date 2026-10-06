@@ -116,6 +116,81 @@ window.SCENES = (function () {
   }
 
   /** 统一的原始数据出口。 */
+  /**
+   * 上传入库的「三步链路」视图：切片 → 向量化 → 存入内存。
+   *
+   * 为什么值得单独做一屏：RAG 里最抽象的一步就是「一篇文档怎么变成向量」。
+   * 后端把切片正文一起带出来了（VectorStore 接口没有 get，入库后就取不回来），
+   * 这里按链路排开 —— 调 agentlab.rag.chunk-size 时对着它看，
+   * 比盯一个「切成了 4 块」的数字有用得多。
+   */
+  function pipelineView(res) {
+    var d = res.data || {};
+    var box = h('div');
+
+    box.appendChild(h('div', { class: 'pipe-flow' }, [
+      pipeStep('① 切片', 'TokenTextSplitter 按标点断句', '共 ' + d.chunksAdded + ' 块'),
+      pipeStep('② 向量化', '本地 ONNX（bge-small-zh）', '每块 ' + d.dimensions + ' 维'),
+      pipeStep('③ 存入内存', 'SimpleVectorStore.add()', '耗时 ' + C.fmtMs(d.costMillis))
+    ]));
+
+    (Array.isArray(d.uploaded) ? d.uploaded : []).forEach(function (doc) {
+      box.appendChild(pipeDoc(doc));
+    });
+
+    var skipped = Array.isArray(d.skipped) ? d.skipped : [];
+    if (skipped.length) {
+      box.appendChild(h('div', { class: 'pipe-skip' }, [
+        h('div', { text: '跳过了 ' + skipped.length + ' 个文件（不影响同批其它文件）：' }),
+        h('ul', { style: { margin: '4px 0 0', paddingLeft: '18px' } },
+          skipped.map(function (s) { return h('li', { text: s }); }))
+      ]));
+    }
+
+    if (d.stats) {
+      box.appendChild(h('div', { class: 'hit-src', style: { marginTop: '10px' },
+        text: '入库后该库共 ' + d.stats.documents + ' 篇 / ' + d.stats.chunks
+          + ' 个片段（kbId = ' + d.stats.id + '）—— 现在回上面问一句，它就能答出你刚才灌进去的内容了' }));
+    }
+    box.appendChild(raw(res));
+    return box;
+  }
+
+  function pipeStep(title, sub, value) {
+    return h('div', { class: 'pipe-step' }, [
+      h('b', { text: title }),
+      h('span', { text: sub }),
+      h('span', { text: value })
+    ]);
+  }
+
+  function pipeDoc(doc) {
+    var previews = Array.isArray(doc.previews) ? doc.previews : [];
+    return h('div', { class: 'pipe-doc' }, [
+      h('div', { class: 'pipe-doc-head' }, [
+        h('b', { text: doc.title }),
+        h('span', { class: 'hit-src', text: doc.source + ' · ' + doc.chars + ' 字 → ' + doc.chunks + ' 块' })
+      ]),
+      previews.length
+        ? h('details', { class: 'pipe-details' }, [
+            h('summary', { text: '看这 ' + previews.length + ' 块被切成了什么样' }),
+            h('div', { class: 'act-hint', style: { margin: '5px 0 3px' },
+              text: '每块开头重复的那句标题是入库时特意拼进正文的 —— 让片段自带「我属于哪篇」的语义，'
+                + '否则一块正文里可能完全没出现主题词，向量就会漂。' }),
+            h('div', { class: 'pipe-chunks' }, previews.map(function (p) {
+              return h('div', { class: 'pipe-chunk' }, [
+                h('div', { class: 'pipe-chunk-head' }, [
+                  h('span', { class: 'pipe-chunk-idx', text: '#' + p.index }),
+                  h('span', { class: 'hit-src', text: p.chars + ' 字' })
+                ]),
+                h('div', { class: 'pipe-chunk-text', text: p.text })
+              ]);
+            }))
+          ])
+        : h('div', { class: 'hit-src', text: '切块后为空 —— 内容太短，检查 agentlab.rag.chunk-size 与 min-chunk-length-to-embed' })
+    ]);
+  }
+
   function raw(res) { return C.jsonDetails('查看原始响应', res.data); }
 
   /* -------------------------------------------------------------- 场景集 --- */
@@ -462,7 +537,8 @@ window.SCENES = (function () {
           '链路：提问 → 向量检索 topK → 片段注入 Prompt → DeepSeek 生成。检索用的是本地 ONNX 模型 <code>bge-small-zh-v1.5</code>（512 维）。',
           '示例语料里「值班补贴」两处口径故意矛盾（200 元 vs 300 元），问它就能看到模型被自己的知识库割裂。',
           '切到「对照实验」模式：同一个问题问两次，并排展示「没有知识库时模型只能编」和「有知识库时出现了编不出来的具体条款」。',
-          '换个知识库再问同一个问题 —— 这就是多知识库的意义。在「接口实验室」里可以新建库、灌文档、做文档级增删改查。'
+          '带上自己的 .md：点「上传 md 文档」选文件 → 后端切片 → 本地 ONNX 向量化 → 存进当前库。入库后会把三步的产物摊开：切成哪几块（含正文预览）、多少维、耗时多少。',
+          '换个知识库再问同一个问题 —— 这就是多知识库的意义。建库用「新建知识库」，灌数据用「上传 md 文档」或「载入示例语料」。'
         ]
       },
       config: [
@@ -519,17 +595,50 @@ window.SCENES = (function () {
               raw(res)
             ]);
           } },
+        { label: '上传 md 文档',
+          submitLabel: '上传并入库',
+          form: [
+            { key: 'files', type: 'file', label: '选择 .md 文件', required: true,
+              multiple: true, accept: '.md,.markdown,.txt',
+              hint: '可一次多选。标题优先取正文第一个「# 标题」，没有就用文件名。' },
+            { key: 'mode', type: 'select', label: '重复上传同一份时', default: 'append',
+              options: [
+                { value: 'append', label: 'append 再存一份（默认）' },
+                { value: 'upsert', label: 'upsert 按文件名覆盖旧的' }
+              ] }
+          ],
+          submit: function (v, c) {
+            var fd = new FormData();
+            v.files.forEach(function (f) { fd.append('files', f, f.name); });
+            return {
+              method: 'POST', path: '/stage8/kb/' + c.kbId + '/upload',
+              query: { mode: v.mode }, form: fd,
+              after: function (a) { a.refreshKbs(); }
+            };
+          },
+          render: function (res) { return pipelineView(res); } },
         { label: '新建知识库',
-          custom: function (ctx) {
-            var id = window.prompt('新知识库 id（字母/数字/下划线/连字符，不能是 docs、search、stats 这类保留字）:', 'kb-web-' + C.randomId(''));
-            if (!id) return null;
-            var name = window.prompt('显示名（可中文）:', '网页新建库') || id;
-            return { method: 'POST', path: '/stage8/kb', json: { id: id, name: name, description: '从智能助手页面创建' },
-              after: function (a) { a.refreshKbs(); a.setCfg('stage8', { kbId: id }); } };
+          submitLabel: '创建',
+          form: [
+            { key: 'id', label: '库 id', required: true,
+              default: function () { return C.randomId('kb-web-'); },
+              placeholder: '字母 / 数字 / 下划线 / 连字符',
+              hint: '不能取 docs、search、stats 这类保留字 —— 它们会被路径字面量抢走（见接口实验室的说明）' },
+            { key: 'name', label: '显示名', placeholder: '可以中文，留空则同 id' },
+            { key: 'description', label: '备注', placeholder: '可选' }
+          ],
+          submit: function (v) {
+            return { method: 'POST', path: '/stage8/kb',
+              json: { id: v.id, name: v.name || v.id, description: v.description || '从智能助手页面创建' },
+              after: function (a) { a.refreshKbs(); a.setCfg('stage8', { kbId: v.id }); } };
           },
           render: function (res) {
             var d = res.data || {};
-            return h('div', { text: '已创建知识库 ' + (d.id || '') + '（' + (d.name || '') + '）。点击「载入示例语料」灌数据。' });
+            return h('div', null, [
+              h('div', { text: '已创建「' + d.id + '」（' + d.name + '）并切到它。'
+                + '空库检索不到东西是正常的 —— 先用「上传 md 文档」或「载入示例语料」灌数据。' }),
+              raw(res)
+            ]);
           } }
       ],
       samples: ['追光科技的年假是怎么规定的？', '值班补贴多少钱一天？', '报销流程需要几天？'],

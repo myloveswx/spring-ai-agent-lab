@@ -282,7 +282,7 @@ public class KnowledgeBase {
         Objects.requireNonNull(content, "content 不能为 null");
         String safeTitle = normalizeTitle(title);
 
-        IngestRecord record = storeChunks(UUID.randomUUID().toString(), safeTitle, content, source);
+        IngestRecord record = storeChunks(UUID.randomUUID().toString(), safeTitle, content, source).record();
         persist();
 
         log.info("{} 入库完成：「{}」{} 字 → {} 块（来源 {}）",
@@ -300,8 +300,13 @@ public class KnowledgeBase {
      *
      * <p>本方法<b>不落盘</b> —— 落盘时机由调用方决定，
      * 因为「先删旧块再入新块」这种复合操作中途落盘是浪费。
+     *
+     * <p>返回 {@link StoredDoc} 而不是光秃秃的 {@code IngestRecord}：
+     * 切片正文在切完这一刻还活着，而 {@code VectorStore} 接口只有
+     * add / delete / similaritySearch，<b>事后取不回来</b>。
+     * 上传接口要把「这一步切成了什么」展示出来，只能在这里顺手带出去。
      */
-    private IngestRecord storeChunks(String docId, String title, String content, String source) {
+    private StoredDoc storeChunks(String docId, String title, String content, String source) {
         // 标题拼进正文再切块：让每个片段都带上「我属于哪篇」的语义，
         // 否则一块正文里可能完全没出现文档主题词，向量就会漂。
         List<Document> chunks = chunk(title + "\n\n" + content, title, source);
@@ -310,14 +315,14 @@ public class KnowledgeBase {
         if (chunks.isEmpty()) {
             log.warn("{} 「{}」切块后为空（原文 {} 字），已跳过入库",
                     tag(), title, content.length());
-            return new IngestRecord(docId, title, source, List.of(), now);
+            return new StoredDoc(new IngestRecord(docId, title, source, List.of(), now), List.of());
         }
 
         store.add(chunks);
         IngestRecord record = new IngestRecord(docId, title, source,
                 chunks.stream().map(Document::getId).toList(), now);
         manifest.put(record.id(), record);
-        return record;
+        return new StoredDoc(record, List.copyOf(chunks));
     }
 
     private static String normalizeTitle(String title) {
@@ -434,7 +439,7 @@ public class KnowledgeBase {
         }
         manifest.remove(docId);
 
-        IngestRecord record = storeChunks(docId, title, content, old.source());
+        IngestRecord record = storeChunks(docId, title, content, old.source()).record();
         persist();
 
         log.info("{} 文档已更新：「{}」（{} 块 → {} 块，docId 不变 {}）",
@@ -488,12 +493,39 @@ public class KnowledgeBase {
         String safeTitle = normalizeTitle(title);
 
         int removed = dropBySource(source);
-        IngestRecord record = storeChunks(UUID.randomUUID().toString(), safeTitle, content, source);
+        IngestRecord record = storeChunks(UUID.randomUUID().toString(), safeTitle, content, source).record();
         persist();
 
         log.info("{} 覆盖入库：「{}」（先清掉同来源的 {} 块，新入库 {} 块，来源 {}）",
                 tag(), safeTitle, removed, record.chunkIds().size(), source);
         return record;
+    }
+
+    /**
+     * 上传入库：落库效果与 {@link #ingest} 一致，但把<b>切片明细</b>一起交出去。
+     *
+     * <p>存在的理由只有一个 —— 让「切片 → 向量化 → 存入」这三步的中间产物可见。
+     * {@code VectorStore} 接口只有 add / delete / similaritySearch，
+     * 不能按 id 取回片段正文；而切片结果在切完那一刻还在手上。
+     * 不在这里上报，事后就只剩一个「切成了 4 块」的数字 ——
+     * 对调切块参数的人来说，「看到原文被切成了什么样」比块数有用得多。
+     *
+     * @param upsert true 表示按 {@code source} 先删后入（同 {@link #upsertBySource}）
+     */
+    public synchronized DocIngest ingestDetailed(String title, String content, String source, boolean upsert) {
+        ensureLoaded();
+        Objects.requireNonNull(content, "content 不能为 null");
+        String safeTitle = normalizeTitle(title);
+
+        // upsert 时 source 必须唯一，否则会把同 source 的其它文档一起删掉 —— 见 upsertBySource 的说明
+        int removed = upsert ? dropBySource(source) : 0;
+        StoredDoc stored = storeChunks(UUID.randomUUID().toString(), safeTitle, content, source);
+        persist();
+
+        log.info("{} 上传入库完成：「{}」{} 字 → {} 块（来源 {}；{}）",
+                tag(), safeTitle, content.length(), stored.record().chunkIds().size(), source,
+                upsert ? "覆盖，先清掉旧块 " + removed + " 个" : "追加");
+        return new DocIngest(stored.record(), stored.chunks());
     }
 
     /** 按 docId 找文档，找不到就抛出带「怎么办」的异常（接口层会映射成 404）。 */
@@ -784,6 +816,19 @@ public class KnowledgeBase {
     /** 一条入库记录 = 一篇源文档。 */
     public record IngestRecord(String id, String title, String source,
                                List<String> chunkIds, String ingestedAt) {
+    }
+
+    /**
+     * 一次入库的完整产物：清单记录 + 实际切出来的片段（含正文）。
+     *
+     * <p>只给上传接口用 —— 那里要把「原文被切成了哪几块」摊开给使用者看。
+     * 日常入库走 {@link #ingest}，不需要背着整份正文到处跑。
+     */
+    public record DocIngest(IngestRecord record, List<Document> chunks) {
+    }
+
+    /** {@link #storeChunks} 的返回：清单记录 + 刚切好的片段。 */
+    private record StoredDoc(IngestRecord record, List<Document> chunks) {
     }
 
     /** 一条检索命中。 */

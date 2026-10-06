@@ -17,6 +17,16 @@ spring:
     name: spring-ai-agent-lab
 
   # ===================================================================
+  # 文件上传上限 —— Stage 8 的 /stage8/kb/{kbId}/upload 收 .md 文件
+  # 默认是单文件 1MB / 单请求 10MB。md 通常很小，但一份写得详细的
+  # 技术文档很容易过 1MB，超了直接 413 且报错信息不直观，所以放宽。
+  # ===================================================================
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 50MB
+
+  # ===================================================================
   # 数据源：Agent 会话记忆落库到本机 MySQL 8.0.28
   #   库 / 表 由 mysql-setup/schema/agent-memory.sql 创建
   #   启动数据库：D:\workspace\mysql-setup\2-start-mysql.cmd
