@@ -46,7 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
                 "spring.ai.mcp.client.enabled=false",
                 // 这个测试只关心「文档里有没有这些路径」，不需要真的把模型载进来跑一遍，
                 // 更要紧的是别去读/写开发时攒下来的真实向量库。
-                "agentlab.rag.store-path=target/stage8-openapi-test-store.json",
+                "agentlab.rag.store-root=target/stage8-openapi-test-store",
                 "agentlab.rag.warmup=false"
         })
 class OpenApiDocsTest {
@@ -119,6 +119,18 @@ class OpenApiDocsTest {
                 "/stage8/kb/stats",
                 "/stage8/kb/save",
                 "/stage8/kb/load",
+                // 多知识库：库管理（列/建/删）+ 带 kbId 的库内操作。
+                // 注意这两组是「并存的同一段代码」—— 方法上挂了两个路径模板，
+                // 不带 kbId 的落到默认库。所以文档里两套 path 都应该在。
+                "/stage8/kb",
+                "/stage8/kb/{kbId}",
+                "/stage8/kb/{kbId}/ingest",
+                "/stage8/kb/{kbId}/ingest-sample",
+                "/stage8/kb/{kbId}/search",
+                "/stage8/kb/{kbId}/stats",
+                "/stage8/kb/{kbId}/clear",
+                "/stage8/kb/{kbId}/save",
+                "/stage8/kb/{kbId}/load",
                 "/stage8/chat",
                 "/stage8/chat/compare",
                 "/diagnostics/encoding/text",

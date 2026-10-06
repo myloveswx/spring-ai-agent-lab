@@ -5,23 +5,14 @@ import java.io.File;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor;
-import org.springframework.ai.chat.client.advisor.vectorstore.QuestionAnswerAdvisor;
-import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.transformers.TransformersEmbeddingModel;
-import org.springframework.ai.vectorstore.SearchRequest;
-import org.springframework.ai.vectorstore.SimpleVectorStore;
-import org.springframework.ai.vectorstore.VectorStore;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.FileSystemResource;
-
-import io.micrometer.observation.ObservationRegistry;
 
 /**
  * Stage 8 —— RAG 知识库（L1 朴素 RAG）的装配。
@@ -41,27 +32,34 @@ import io.micrometer.observation.ObservationRegistry;
  * 加料（改切块、改 topK、加查询改写、加混合检索、加重排、让 Agent 自己决定检索几轮）。
  * 所以先把 L1 跑通、并且<b>能直接看到检索命中了什么</b>，后面每一步优化才有基线可比。
  *
- * <h2>三个 Bean 各自解决什么问题</h2>
+ * <h2>多知识库之后，只有嵌入模型还留在这个类里</h2>
  * <table border="1">
- *   <caption>Stage 8 核心 Bean</caption>
- *   <tr><th>Bean</th><th>职责</th><th>为什么需要自己声明</th></tr>
+ *   <caption>Stage 8 各组件的归属</caption>
+ *   <tr><th>组件</th><th>职责</th><th>谁来创建</th></tr>
  *   <tr>
  *     <td>{@link EmbeddingModel}</td>
  *     <td>文本 → 向量</td>
- *     <td>DeepSeek <b>没有</b> embedding 接口，必须另找一家；
- *         这里用本机 ONNX 模型，完全离线</td>
+ *     <td><b>本类</b>。DeepSeek <b>没有</b> embedding 接口，必须另找一家；
+ *         这里用本机 ONNX 模型，完全离线。
+ *         所有知识库<b>共用</b>这一个模型实例 —— 它无状态，没必要每库一份</td>
  *   </tr>
  *   <tr>
- *     <td>{@link VectorStore}</td>
+ *     <td>{@code SimpleVectorStore}</td>
  *     <td>存向量 + 相似度检索</td>
- *     <td>无 Docker、不引外部向量库，用内置 {@link SimpleVectorStore}（内存 + 可落盘）</td>
+ *     <td><b>{@link com.agentlab.stage8.KnowledgeBaseRegistry}</b>。
+ *         多知识库下每个库一个实例，不可能声明成单例</td>
  *   </tr>
  *   <tr>
- *     <td>{@link QuestionAnswerAdvisor}</td>
+ *     <td>{@code QuestionAnswerAdvisor}</td>
  *     <td>「检索 → 拼 Prompt」这段胶水</td>
- *     <td>spring-ai-vector-store-advisor 这个 artifact 里只有类、没有自动配置</td>
+ *     <td><b>{@link RagAdvisors#forStore}</b>。
+ *         它与 VectorStore 是一对一绑定的，多库场景只能按库现造</td>
  *   </tr>
  * </table>
+ * <p>这是一条通用的重构信号：<b>当某个 Bean 从「全局唯一」变成「每份数据一个」时，
+ * 它就该从 {@code @Configuration} 里搬出去，交给管理那份数据的人去创建</b>。
+ * 硬把单例留在配置类里，得到的是「所有知识库共用同一份向量」——
+ * 而且它不会报错，只会静默地把数据混在一起。
  *
  * <h2>为什么整块配置带开关</h2>
  * {@code @ConditionalOnProperty(agentlab.rag.enabled)} + {@code matchIfMissing=true}
@@ -153,88 +151,12 @@ public class Stage8RagConfig {
         return embeddingModel;
     }
 
-    /**
-     * 向量库：内置的 {@link SimpleVectorStore}。
-     *
-     * <p>它是「一个 ConcurrentHashMap + 遍历算余弦」，没有任何索引结构 ——
-     * 千级片段完全够用，几十万条就会慢。之所以先用它：
-     * 没有 Docker（本机实测镜像源不可用），而 {@code VectorStore} 接口只有
-     * {@code add / delete / similaritySearch} 四个方法，
-     * <b>先摸清接口契约，后面换成 MySQL 自研实现、或者换 PGVector / Milvus 都只是换一个 Bean</b>。
-     *
-     * <p>注意 {@code observationRegistry}：不显式传会退化成 {@code ObservationRegistry.NOOP}，
-     * 那样 Stage 4 学到的 Micrometer 指标就看不到向量检索这段耗时了。
-     *
-     * <p>返回类型照旧写<b>具体类 {@link SimpleVectorStore}</b> 而不是接口 {@code VectorStore} ——
-     * 因为 {@code save(File)} / {@code load(File)} 这两个落盘方法只存在于实现类上，
-     * 接口里没有。写成接口的话，调用方要么被迫强转、要么拿不到持久化能力。
-     * 这与 {@link #embeddingModel} 那条返回类型规则是同一个道理：
-     * <b>能写具体类就别图省事写接口</b>。
-     */
-    @Bean
-    public SimpleVectorStore vectorStore(EmbeddingModel embeddingModel,
-                                         ObjectProvider<ObservationRegistry> observationRegistry) {
-        return SimpleVectorStore.builder(embeddingModel)
-                .observationRegistry(observationRegistry.getIfAvailable(() -> ObservationRegistry.NOOP))
-                .build();
-    }
-
-    /**
-     * RAG 的「胶水」Advisor：提问进来 → 检索 → 改写 Prompt。
-     *
-     * <p>反编译 {@code QuestionAnswerAdvisor#before} 可以看到它干了三件事（顺序固定）：
-     * <pre>
-     *   1. query = 当前用户消息原文（不做任何改写）
-     *   2. docs  = vectorStore.similaritySearch(query, topK, threshold)
-     *      context.put("qa_retrieved_documents", docs)   ← 检索命中的原文就挂在这里
-     *   3. 用 promptTemplate 渲染 {query} + {question_answer_context}，
-     *      然后把「用户消息」整体替换成渲染结果
-     * </pre>
-     * 第 3 点很关键：它替换的是 <b>user message</b>，不是 system message，
-     * 所以你在 ChatClient 上设的 {@code defaultSystem(...)} 仍然生效，两者是叠加关系。
-     *
-     * <h3>为什么必须换掉默认提示词</h3>
-     * 默认模板是英文祈使句（"If the answer is not in the context, inform the user
-     * that you can't answer the question."）。对中文知识库 + 中文提问来说，
-     * 中文模板能让模型更稳定地「只依据给定资料作答、并说明依据来自哪一段」，
-     * 也顺手把「不许编」这条硬规则写死在模板里 —— 而不是指望模型自觉。
-     *
-     * <h3>order 为什么给 -100</h3>
-     * Advisor 的 order 越小越靠外层。这里让 RAG 排在
-     * {@link SimpleLoggerAdvisor}（默认 order = 0）**外面**，
-     * 于是日志里打出来的就是「已经被注入过检索片段」的最终 Prompt。
-     * 调过来写的话，你只能看到用户原始那句提问，
-     * 而「到底检索到了什么」这件事就看不见了 —— 那正是 L1 最需要观察的东西。
-     */
-    @Bean
-    public QuestionAnswerAdvisor questionAnswerAdvisor(VectorStore vectorStore, RagProperties props) {
-        PromptTemplate ragPrompt = new PromptTemplate("""
-                {query}
-
-                ===== 以下是知识库中检索到的资料 =====
-                ---------------------
-                {question_answer_context}
-                ---------------------
-                ===== 资料结束 =====
-
-                回答要求：
-                1. 只依据上面「检索到的资料」作答。资料里没有写的内容，直接说「知识库中没有相关信息」，
-                   绝不使用你自己的先验知识补充或猜测。
-                2. 资料中若出现互相矛盾的说法，指出矛盾并分别列出，不要自行选一个。
-                3. 引用到具体条款/数字时，把「来自哪一段资料」一并说明。
-                4. 用简洁的中文回答，不要复述这段指令本身。
-                """);
-
-        return QuestionAnswerAdvisor.builder(vectorStore)
-                .promptTemplate(ragPrompt)
-                .searchRequest(SearchRequest.builder()
-                        .topK(props.getTopK())
-                        .similarityThreshold(props.getSimilarityThreshold())
-                        .build())
-                // 外层：先检索、先改写 Prompt，再交给内层的日志 Advisor 打印
-                .order(-100)
-                .build();
-    }
+    // 注：单库时代这里还声明了 SimpleVectorStore 与 QuestionAnswerAdvisor 两个 Bean。
+    // 支持多知识库后两者都搬走了：
+    //   向量库  → KnowledgeBaseRegistry 按库创建（每库一个实例）
+    //   Advisor → RagAdvisors.forStore 按库现造（它与 store 是一对一绑定的）
+    // 把它们继续留在这里当单例，等价于「所有知识库共用同一份向量」——
+    // 而且不会抛异常，只会静默地把数据混在一起。见类注释里的归属表。
 
     /**
      * 启动预热：把首次嵌入的一次性开销提前到启动期。

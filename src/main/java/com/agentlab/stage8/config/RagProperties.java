@@ -55,8 +55,21 @@ public class RagProperties {
      */
     private double similarityThreshold = 0.5;
 
-    /** 落盘文件路径（{@code SimpleVectorStore.save/load} 用）。目录不存在会自动创建。 */
-    private String storePath;
+    /**
+     * 知识库根目录。<b>注意这里是「目录」不是「文件」</b> ——
+     * 支持多知识库之后，每个库在根目录下占一个以自己 id 命名的子目录：
+     * <pre>
+     *   &lt;store-root&gt;/
+     *   ├── kb-index.tsv      全部库的元数据（注册表维护）
+     *   ├── default/store.json + manifest.tsv
+     *   └── kb1/store.json + manifest.tsv
+     * </pre>
+     * 目录不存在会自动创建。
+     *
+     * <p>（单库时代这个配置叫 {@code store-path}、指向一个 json 文件。
+     * 升级时旧文件会被自动迁移进 {@code default/} 子目录，不会丢数据。）
+     */
+    private String storeRoot;
 
     /**
      * 启动时是否跑一次「预热嵌入」。
@@ -115,12 +128,12 @@ public class RagProperties {
         this.similarityThreshold = similarityThreshold;
     }
 
-    public String getStorePath() {
-        return storePath;
+    public String getStoreRoot() {
+        return storeRoot;
     }
 
-    public void setStorePath(String storePath) {
-        this.storePath = storePath;
+    public void setStoreRoot(String storeRoot) {
+        this.storeRoot = storeRoot;
     }
 
     public boolean isWarmup() {

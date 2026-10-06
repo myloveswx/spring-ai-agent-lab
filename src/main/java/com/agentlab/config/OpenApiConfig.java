@@ -67,7 +67,8 @@ public class OpenApiConfig {
                                 5. **结构化输出** —— `.entity()` 反序列化 + 校验失败自动重试
                                 6. **渐进式工具披露** —— 工具多了以后按相关度动态筛选，而非全量下发
                                 7. **MCP 客户端** —— 接入外部 MCP Server（默认关闭）
-                                8. **RAG 知识库** —— 本地 ONNX 嵌入 + 向量检索 + `QuestionAnswerAdvisor`
+                                8. **RAG 知识库（多库）** —— 本地 ONNX 嵌入 + 向量检索 + `QuestionAnswerAdvisor`；
+                                   每个知识库一个独立目录与独立向量库，物理隔离、互不干扰
 
                                 > 除「编码自检」外，所有对话接口都需要真实调用 DeepSeek，
                                 > 因此启动前必须先设置环境变量 `DEEPSEEK_API_KEY` ——
@@ -106,9 +107,13 @@ public class OpenApiConfig {
                                 .description("MCP 客户端接入，默认关闭；开启后需在 Swagger 中触发 "
                                         + "（注意需重启才生效）。"),
                         new Tag().name(TAG_STAGE8)
-                                .description("L1 朴素 RAG：本地 ONNX 嵌入 + 内存向量库 + 检索增强问答。"
+                                .description("L1 朴素 RAG：本地 ONNX 嵌入 + 内存向量库 + 检索增强问答，"
+                                        + "**支持多知识库**（每个库一个独立目录，物理隔离、互不干扰）。"
+                                        + "库管理走 /stage8/kb（GET 列表 / POST 建库 / DELETE /{kbId} 删库）；"
+                                        + "库内操作走 /stage8/kb/{kbId}/**，而不带 kbId 的老路径等价于 default 库。"
                                         + "建议先跑 /stage8/kb/search（不含模型、结果可复现），"
-                                        + "再看 /stage8/chat/compare 的对照效果。"),
+                                        + "再看 /stage8/chat/compare 的对照效果；"
+                                        + "把同一个问题分别问 kb1 与 kb2，就能看到「各自只依据自己的资料作答」。"),
                         new Tag().name(TAG_DIAGNOSTICS)
                                 .description("不依赖大模型的纯本地端点，用于定位请求 / 响应编码问题。")));
     }

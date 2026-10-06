@@ -26,7 +26,7 @@ import org.springframework.boot.test.context.SpringBootTest;
         "spring.ai.deepseek.api-key=test-key-for-context-load",
         "spring.ai.mcp.client.enabled=false",
         // 别去读/写开发时攒下来的真实向量库，也别为测试付预热开销
-        "agentlab.rag.store-path=target/stage8-smoke-test-store.json",
+        "agentlab.rag.store-root=target/stage8-smoke-test-store",
         "agentlab.rag.warmup=false"
 })
 class AgentLabApplicationTests {

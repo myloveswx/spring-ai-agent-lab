@@ -10,9 +10,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Comparator;
 import java.util.List;
 
-import com.agentlab.stage8.KnowledgeBaseService.Hit;
+import com.agentlab.stage8.KnowledgeBase.Hit;
+import com.agentlab.stage8.KnowledgeBaseRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -29,32 +31,37 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Stage 8（L1 朴素 RAG）测试。
+ * Stage 8（L1 朴素 RAG）测试 —— <b>默认知识库</b>这条基线。
  *
  * <h2>这个测试为什么跑得动、且值得跑</h2>
  * RAG 链路里最难测的一直是「检索对不对」，因为它依赖模型输出、带随机性。
  * 但<b>向量检索这一层是确定性的</b>：同一个 (语料, query, topK, 阈值) 必然得到同一组命中。
- * 所以下面这些断言全部是稳定的 —— 这正是 L1 要先做「检索接口」而不是先做「问答接口」的原因：
+ * 所以下面这些断言全部是稳定的 —— 这正是要先做「检索接口」而不是先做「问答接口」的原因：
  * <b>把可以确定化的部分确定化，才有可回归的基线。</b>
  *
  * <h2>完全离线</h2>
  * 嵌入用本机 ONNX 模型，检索用内存向量库，
- * <b>整个测试不碰 DeepSeek、不联网</b>（DeepSeek 的 Key 是假的，且不会被真正调用）。
- * 这也是本地嵌入方案（方案 A）相对于云端 embedding API 的一个实际好处：
+ * <b>整个测试不碰 DeepSeek、不联网</b>（Key 是假的，且不会被真正调用）。
+ * 这也是本地嵌入方案相对于云端 embedding API 的一个实际好处：
  * 单测可以完整覆盖 RAG 的检索侧，不需要 mock 网络。
+ *
+ * <h2>与多知识库的分工</h2>
+ * 本类只关心默认库那条老链路（{@code /stage8/kb/xxx} 不带 kbId 的写法）是否还照常工作 ——
+ * <b>它就是「加了多库之后，单库的老行为有没有被破坏」的回归网</b>。
+ * 库间隔离、建库删库这些新能力，由 {@link Stage8MultiKnowledgeBaseTest} 覆盖。
  *
  * <h2>两个刻意的测试配置</h2>
  * <ul>
- *   <li>{@code agentlab.rag.store-path=target/stage8-test-store.json}
- *       —— 把落盘位置指到构建目录，<b>绝不污染真实知识库</b>；
+ *   <li>{@code agentlab.rag.store-root=target/stage8-test-store}
+ *       —— 把知识库根目录指到构建目录，<b>绝不污染真实知识库</b>；
  *       否则一次 {@code clear()} 就会把开发时攒的向量全删了。</li>
  *   <li>{@code agentlab.rag.warmup=false} —— 预热是给「真实启动」消除首次延迟用的
  *       （详见 {@code Stage8RagConfig#ragWarmupRunner}），测试里没必要付这份开销。</li>
  * </ul>
  *
- * <p>{@link #cleanSlate()} 那个 {@code @BeforeAll} 也不是多余的：知识库会在
- * {@code @PostConstruct} 阶段（也就是 Spring 上下文加载时）从磁盘恢复历史状态。
- * 如果上一次运行留下的清单和向量文件还在，测试就会从一个「有历史」的状态开始 ——
+ * <p>{@link #cleanSlate()} 那个 {@code @BeforeAll} 也不是多余的：知识库会在被第一次访问时
+ * 从磁盘恢复历史状态（懒加载）。如果上一次运行留下的清单和向量还在，
+ * 测试就会从一个「有历史」的状态开始 ——
  * <b>测试必须自己负责把外部状态清零</b>，不能指望上一次跑完是干净的。
  * 好在 JUnit 的 {@code @BeforeAll} 一定早于「创建测试实例」，
  * 而 Spring 正是在创建实例时才加载上下文，所以这个时机是安全的。
@@ -64,30 +71,46 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
         properties = {
                 "spring.ai.deepseek.api-key=test-key-for-context-load",
                 "spring.ai.mcp.client.enabled=false",
-                "agentlab.rag.store-path=target/stage8-test-store.json",
+                "agentlab.rag.store-root=target/stage8-test-store",
                 "agentlab.rag.warmup=false"
         })
 class Stage8RagTest {
 
-    /** 与 @SpringBootTest 里的 agentlab.rag.store-path 保持一致。 */
-    private static final String STORE_PATH = "target/stage8-test-store.json";
+    /** 与 @SpringBootTest 里的 agentlab.rag.store-root 保持一致。 */
+    private static final String STORE_ROOT = "target/stage8-test-store";
 
     /**
-     * 清掉上一次运行留下的落盘文件，让每次测试都从「空知识库」开始。
-     * <p>必须用 {@code @BeforeAll}（早于 Spring 加载上下文），
-     * 因为恢复逻辑跑在上下文初始化阶段，晚于 {@code @BeforeEach} 就没意义了。
+     * 清掉上一次运行留下的整个知识库目录（含各库子目录），让每次测试都从「空库」开始。
+     * <p>必须用 {@code @BeforeAll}（早于 Spring 加载上下文）：恢复逻辑跑在
+     * 「库第一次被访问」时，晚于 {@code @BeforeEach} 就没意义了。
+     * <p>递归删除只作用于 {@code target/} 下的构建产物目录，不会碰到真实知识库。
      */
     @BeforeAll
     static void cleanSlate() throws IOException {
-        Files.deleteIfExists(Path.of(STORE_PATH));
-        Files.deleteIfExists(Path.of(STORE_PATH + ".manifest.tsv"));
+        deleteRecursively(Path.of(STORE_ROOT));
+    }
+
+    private static void deleteRecursively(Path dir) throws IOException {
+        if (!Files.exists(dir)) {
+            return;
+        }
+        try (var walk = Files.walk(dir)) {
+            for (Path path : walk.sorted(Comparator.reverseOrder()).toList()) {
+                Files.deleteIfExists(path);
+            }
+        }
     }
 
     @LocalServerPort
     private int port;
 
     @Autowired
-    private KnowledgeBaseService knowledgeBase;
+    private KnowledgeBaseRegistry registry;
+
+    /** 默认库 —— 不带 kbId 的那些接口都落在它上面。 */
+    private KnowledgeBase kb() {
+        return registry.get(KnowledgeBaseRegistry.DEFAULT_ID);
+    }
 
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -198,6 +221,8 @@ class Stage8RagTest {
 
         JsonNode stats = getJson("/stage8/kb/stats");
 
+        assertEquals(KnowledgeBaseRegistry.DEFAULT_ID, stats.get("id").asText(),
+                "老接口（不带 kbId）应操作默认库");
         assertEquals(3, stats.get("documents").asInt(), "应有 3 篇文档");
         assertTrue(stats.get("chunks").asInt() > 0, "块数应大于 0");
         assertEquals(512, stats.get("dimensions").asInt(), "bge-small-zh-v1.5 的输出维度是 512");
@@ -225,9 +250,9 @@ class Stage8RagTest {
     @Test
     @DisplayName("检索结果必须按相似度降序 —— 否则 topK 截断就是错的")
     void hitsMustBeSortedByScoreDesc() {
-        knowledgeBase.ingestSampleDocs();
+        kb().ingestSampleDocs();
 
-        List<Hit> hits = knowledgeBase.searchAsHits("报销要附什么材料", 6, 0.0);
+        List<Hit> hits = kb().searchAsHits("报销要附什么材料", 6, 0.0);
         assertTrue(hits.size() >= 2, "应有多个命中用于比较排序");
 
         for (int i = 1; i < hits.size(); i++) {
@@ -241,47 +266,47 @@ class Stage8RagTest {
     @Test
     @DisplayName("重复载入同一份语料必须幂等，不能把向量库灌成好几份")
     void reingestShouldBeIdempotent() {
-        knowledgeBase.clear();
-        knowledgeBase.ingestSampleDocs();
-        int first = knowledgeBase.stats().chunks();
+        kb().clear();
+        kb().ingestSampleDocs();
+        int first = kb().stats().chunks();
 
-        knowledgeBase.ingestSampleDocs();
-        int second = knowledgeBase.stats().chunks();
+        kb().ingestSampleDocs();
+        int second = kb().stats().chunks();
 
         assertEquals(first, second,
                 "同一来源重复载入后块数变化（" + first + " -> " + second + "），removeBySource 没生效");
-        assertEquals(3, knowledgeBase.stats().documents(), "文档数应保持 3");
+        assertEquals(3, kb().stats().documents(), "文档数应保持 3");
     }
 
     @Test
     @DisplayName("清空后检索应为空 —— 用来重置「无 RAG / 有 RAG」的对照实验")
     void clearShouldEmptyTheKnowledgeBase() {
-        knowledgeBase.ingestSampleDocs();
-        assertTrue(knowledgeBase.stats().chunks() > 0);
+        kb().ingestSampleDocs();
+        assertTrue(kb().stats().chunks() > 0);
 
-        knowledgeBase.clear();
+        kb().clear();
 
-        assertEquals(0, knowledgeBase.stats().chunks());
-        assertEquals(0, knowledgeBase.stats().documents());
-        assertTrue(knowledgeBase.search("年假有几天", null, null).isEmpty(),
+        assertEquals(0, kb().stats().chunks());
+        assertEquals(0, kb().stats().documents());
+        assertTrue(kb().search("年假有几天", null, null).isEmpty(),
                 "清空后不应再检索到任何片段");
     }
 
     @Test
     @DisplayName("落盘与载入：向量应能持久化并恢复")
     void saveAndLoadShouldRoundTrip() {
-        knowledgeBase.ingestSampleDocs();
-        int chunks = knowledgeBase.stats().chunks();
+        kb().ingestSampleDocs();
+        int chunks = kb().stats().chunks();
 
-        var saved = knowledgeBase.saveToDisk();
+        var saved = kb().saveToDisk();
         assertTrue(((Number) saved.get("sizeBytes")).longValue() > 0, "落盘文件不应为空");
         assertEquals(chunks, ((Number) saved.get("chunks")).intValue());
 
         // 载回之后检索结果必须还在，且内容一致 ——
         // 如果只 load 了向量却丢了清单，这里能立刻发现。
-        var loaded = knowledgeBase.loadFromDisk();
+        var loaded = kb().loadFromDisk();
         assertEquals(chunks, ((Number) loaded.get("chunks")).intValue());
-        assertTrue(knowledgeBase.search("年假有几天", 1, 0.3).size() > 0,
+        assertTrue(kb().search("年假有几天", 1, 0.3).size() > 0,
                 "载入后应仍能检索到片段");
     }
 }

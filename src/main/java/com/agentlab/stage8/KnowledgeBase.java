@@ -13,10 +13,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 import com.agentlab.stage8.config.RagProperties;
-import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,70 +29,68 @@ import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.SimpleVectorStore;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.ResourcePatternResolver;
-import org.springframework.stereotype.Service;
+
+import io.micrometer.observation.ObservationRegistry;
 
 /**
- * Stage 8 —— 知识库服务：把「切块 + 嵌入 + 存储 + 检索」这四件事收在一处。
+ * 一个知识库（单个库的完整能力：切块 / 嵌入 / 存储 / 检索 / 落盘）。
  *
- * <h2>为什么要有这一层，而不是让 Controller 直接调 VectorStore</h2>
- * 因为 RAG 的「入库」和「检索」是两条<b>不对称</b>的链路：
+ * <h2>它和「多知识库」的关系</h2>
+ * 这个类<b>只管一个库</b>，不知道自己有多少个兄弟。多个库的编排
+ * （建库、查库、删库、按 id 找实例）全部交给
+ * {@link KnowledgeBaseRegistry}。这样切分的好处是：单库的所有状态
+ * （向量、清单、目录）都封闭在一个对象里，<b>库与库之间天然没有共享可变状态</b>，
+ * 也就不会出现「A 库的清理把 B 库的账本改了」这种串库事故。
+ *
+ * <h2>每个库 = 一个目录 + 一份向量 + 一份清单</h2>
  * <pre>
- *   入库（低频、可慢）：原文 ──切块──▶ chunks ──嵌入──▶ 带 metadata 的向量 → VectorStore
- *   检索（高频、要快）：query ──嵌入──▶ 向量 ──相似度──▶ topK Document
+ *   &lt;store-root&gt;/
+ *   ├── kb-index.tsv          ← 全部库的元数据（注册表维护）
+ *   ├── default/
+ *   │   ├── store.json        ← 向量本体（SimpleVectorStore 序列化的整个 Map）
+ *   │   └── manifest.tsv      ← 账本：哪几篇文档、各切成几块、块 id 是什么
+ *   └── kb1/
+ *       ├── store.json
+ *       └── manifest.tsv
  * </pre>
- * 入库时多花的每一点心思（怎么切、带什么 metadata）都会在检索时兑现；
- * 而检索侧能调的东西其实很少（topK、阈值、要不要过滤）。
- * 把两层分开，你才能明确「这次效果变好，是我改了入库还是改了检索」。
+ * 物理隔离（一库一文件）而不是「一个文件里按 kbId 过滤」，是刻意的取舍，
+ * 详见 {@link KnowledgeBaseRegistry} 的类注释。
  *
- * <h2>一个容易被忽略的坑：向量库不管「清单」</h2>
- * {@code VectorStore} 接口只有 {@code add / delete / similaritySearch} 四个方法，
- * <b>没有 count()、没有 list()、没有按 source 分组统计</b>。
- * 也就是说：向量存进去了，但「我一共存了哪几篇、每篇几块」这件事，
- * 向量库不负责回答 —— 必须自己维护一份清单（本类的 manifest 文件就是干这个的）。
- *
- * <p>这不是 Spring AI 的设计缺陷，而是所有向量数据库的共性：
- * 它们定位是「相似度检索引擎」，不是「业务数据库」。
- * 真实项目里的标准做法是「MySQL 存业务元数据 + 向量库存向量」，
- * 用同一个 documentId 关联 —— 这也是把 L1 升级到 L2 时最该先做的一件事。
- *
- * <h2>清单为什么用 TSV 而不是 JSON</h2>
- * 这里踩过一次坑：本来想注入 {@code ObjectMapper} 来读写清单，
- * 结果 <b>Spring Boot 4 用的是 Jackson 3（包名 {@code tools.jackson}），
- * 容器里根本没有 {@code com.fasterxml.jackson.databind.ObjectMapper} 这个 Bean</b>
- * （Jackson 2 只是被 springdoc 之类顺带带进来的库，不是容器管理的 Bean），
- * 启动时直接 `required a bean of type 'ObjectMapper' that could not be found`。
- *
- * <p>于是改用最朴素的 TSV：一份「每行一篇文档」的纯文本。
- * 清单是本应用内部的中间产物、格式完全自控，用不着序列化框架；
- * 少一个依赖就少一类版本兼容问题 —— 这也是 L1 阶段该有的取舍。
- * 想要 JSON 的话，正确的注入类型是 {@code tools.jackson.databind.ObjectMapper}。
+ * <h2>懒加载：为什么不在启动时把所有库都读进内存</h2>
+ * {@link SimpleVectorStore} 是<b>纯内存</b>实现，一个库的向量就对应一份常驻 Map。
+ * 如果启动时把 20 个库全 load 进来，就是 20 份常驻内存 + 20 次文件 I/O，
+ * 而其中 19 个可能这一整天都没人用。
+ * 所以这里用「元数据先恢复、向量等第一次访问再读盘」（{@link #ensureLoaded()}）——
+ * 代价是第一次访问某个库时会多几百毫秒，收益是启动快且内存与「实际活跃的库数」成正比。
  *
  * <h2>持久化：清单才是权威，向量文件只是缓存</h2>
- * 这块也踩过一次坑，而且是<b>真实的设计缺陷</b>，不是测试写法问题：
+ * 这块踩过一次坑，而且是<b>真实的设计缺陷</b>：
  * <pre>
- *   清单  ——每次入库/清空都写盘（因为它是「唯一可信的账本」）
- *   向量  ——原本只在手动调用 /kb/save 时才写盘
+ *   清单  ——每次入库/清空都写盘（它是「唯一可信的账本」）
+ *   向量  ——原本只在手动 save 时才写盘
  * </pre>
- * 两者于是处在<b>不同的「代际」</b>：进程重启后，清单记的是第 N 代，
- * 向量文件里躺着第 N-1 代。启动时把旧代际的向量灌进内存，
+ * 两者于是处在<b>不同的「代际」</b>：重启后把旧代际的向量灌进内存，
  * 而清单里的 id 一个都对不上 —— 结果 {@code clear()} 按清单 id 去删，
- * 删的是「不存在的 id」，旧向量永远留在库里变成<b>孤儿</b>，
+ * 删的是不存在的 id，旧向量永远留着变成<b>孤儿</b>，
  * 表现就是「清空之后还能检索到内容」。
  *
- * <p>两条修正，缺一不可：
+ * <p>两条修正缺一不可：
  * <ol>
- *   <li><b>清单即为真相</b>：清单为空就不加载向量文件（孤儿向量一律不认）；
- *   <li><b>变更即落盘</b>：{@link #ingest} 与 {@link #clear} 之后立刻
- *       把清单和向量一起写盘，让二者永远同一代际。
+ *   <li><b>清单即为真相</b>：清单为空就不加载向量文件（孤儿向量一律不认）；</li>
+ *   <li><b>变更即落盘</b>：{@link #ingest} 与 {@link #clear} 之后立刻把
+ *       清单和向量一起写盘，让二者永远同一代际。</li>
  * </ol>
- * 顺带一个通用的教训：<b>「谁是权威」这件事必须在设计时讲清楚</b>。
- * 这里向量库是个「可以被重建的缓存」，清单才是账本 ——
- * 一旦反过来（让缓存当真相），就会出现上面这种删不掉、也说不清的残留状态。
+ * 通用教训：<b>「谁是权威」必须在设计时讲清楚</b>。
+ * 向量库是可以被重建的缓存，清单才是账本 —— 一旦反过来让缓存当真相，
+ * 就会出现这种删不掉、也说不清的残留状态。
+ *
+ * <h2>并发</h2>
+ * 公开方法全部 {@code synchronized}（实例锁）。理由是「库」这个粒度的操作天然互斥：
+ * 入库要同时改向量和清单，检索要读同一份内存 Map。
+ * 锁的粒度是<b>单个库</b>而不是全局 —— 这正是物理隔离带来的另一个好处：
+ * 往 kb1 灌文档不会阻塞对 kb2 的检索。
  */
-@Service
-public class KnowledgeBaseService {
-
-    private static final Logger log = LoggerFactory.getLogger(KnowledgeBaseService.class);
+public class KnowledgeBase {
 
     // ================== metadata 契约 ==================
     // 写成常量而不是散落的字符串字面量：检索回来之后，
@@ -108,12 +106,23 @@ public class KnowledgeBaseService {
     /** 入库时间。 */
     public static final String META_INGESTED_AT = "ingestedAt";
 
+    /** 每个库目录内的固定文件名。 */
+    public static final String STORE_FILE = "store.json";
+    public static final String MANIFEST_FILE = "manifest.tsv";
+
     /** 内置示例语料的 classpath 位置。 */
     private static final String SAMPLE_PATTERN = "classpath:rag/*.md";
 
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    private final SimpleVectorStore vectorStore;
+    private static final Logger log = LoggerFactory.getLogger(KnowledgeBase.class);
+
+    private final KnowledgeBaseMeta meta;
+
+    /** 本库的数据目录：&lt;store-root&gt;/&lt;id&gt;/。 */
+    private final Path dir;
+
+    private final SimpleVectorStore store;
     private final EmbeddingModel embeddingModel;
     private final RagProperties props;
     private final ResourcePatternResolver resourceResolver;
@@ -127,11 +136,17 @@ public class KnowledgeBaseService {
      */
     private final Map<String, IngestRecord> manifest = new LinkedHashMap<>();
 
-    public KnowledgeBaseService(SimpleVectorStore vectorStore,
-                               EmbeddingModel embeddingModel,
-                               RagProperties props,
-                               ResourcePatternResolver resourceResolver) {
-        this.vectorStore = vectorStore;
+    /** 是否已从磁盘读过一次。防止「已加载 → 又被 load 覆盖掉内存中的新变更」。 */
+    private boolean loaded;
+
+    KnowledgeBase(KnowledgeBaseMeta meta,
+                  Path dir,
+                  EmbeddingModel embeddingModel,
+                  RagProperties props,
+                  ResourcePatternResolver resourceResolver,
+                  ObservationRegistry observationRegistry) {
+        this.meta = meta;
+        this.dir = dir;
         this.embeddingModel = embeddingModel;
         this.props = props;
         this.resourceResolver = resourceResolver;
@@ -141,23 +156,58 @@ public class KnowledgeBaseService {
                 .withMinChunkLengthToEmbed(props.getMinChunkLengthToEmbed())
                 .withKeepSeparator(true)
                 .build();
+        // 显式传 observationRegistry：不传会退化成 NOOP，
+        // 那样 Stage 4 学到的 Micrometer 指标就看不到向量检索这段耗时了。
+        this.store = SimpleVectorStore.builder(embeddingModel)
+                .observationRegistry(observationRegistry)
+                .build();
+    }
+
+    // ==================================================================
+    // 元数据 / 加载
+    // ==================================================================
+
+    public KnowledgeBaseMeta meta() {
+        return meta;
+    }
+
+    public String id() {
+        return meta.id();
+    }
+
+    public Path dir() {
+        return dir;
+    }
+
+    public Path storeFile() {
+        return dir.resolve(STORE_FILE);
+    }
+
+    public Path manifestFile() {
+        return dir.resolve(MANIFEST_FILE);
     }
 
     /**
-     * 启动时尝试从磁盘恢复。
+     * 懒加载：只在第一次被访问时读盘，之后就是一个纯内存的库。
      *
-     * <p>{@code SimpleVectorStore} 是纯内存实现，进程一停向量就没了。
-     * 它提供了 {@code save(File)} / {@code load(File)}，
-     * 这就是「不想重跑一遍嵌入」时最低成本的持久化方案（本质是把整个 Map 序列化成 JSON）。
+     * <p>关键点是 {@code loaded} 标志 —— {@code SimpleVectorStore.load(File)}
+     * 语义是<b>整体替换</b>内存里的 Map。如果允许重复 load，
+     * 一次「入库之后再有人调 load」就会把刚入库的内容悄悄抹掉。
      */
-    @PostConstruct
-    void restoreFromDisk() {
-        Path manifestPath = manifestPath();
-        if (!Files.isRegularFile(manifestPath)) {
-            log.info("Stage 8 · 未发现历史清单 {}，知识库从空开始。"
-                    + "调用 GET /stage8/kb/ingest-sample 可一键载入内置示例语料。", manifestPath);
+    synchronized void ensureLoaded() {
+        if (loaded) {
             return;
         }
+        loaded = true;
+
+        Path manifestPath = manifestFile();
+        if (!Files.isRegularFile(manifestPath)) {
+            log.info("{} 未发现历史清单 {}，知识库从空开始。"
+                    + "调用 POST /stage8/kb/{}/ingest-sample 可一键载入内置示例语料。",
+                    tag(), manifestPath, meta.id());
+            return;
+        }
+
         try {
             for (String line : Files.readAllLines(manifestPath, StandardCharsets.UTF_8)) {
                 IngestRecord record = parseManifestLine(line);
@@ -166,39 +216,35 @@ public class KnowledgeBaseService {
                 }
             }
         } catch (IOException e) {
-            log.warn("Stage 8 · 清单读取失败（{}），按空知识库继续启动。", e.getMessage());
+            log.warn("{} 清单读取失败（{}），按空知识库继续。", tag(), e.getMessage());
             return;
         }
 
-        File storeFile = new File(props.getStorePath());
+        Path storePath = storeFile();
         if (manifest.isEmpty()) {
             // 清单是权威：清单里没有的东西一律不认。
-            // 这里如果硬把向量文件读进来，就会得到一批「没有账本的孤儿向量」——
+            // 硬把向量文件读进来会得到一批「没有账本的孤儿向量」——
             // 它们能检索到、却永远删不掉（clear 是按清单 id 删的）。
-            // 空库属于正常状态（清空之后落盘的就是空 store），所以只对「非空但不认」报警。
-            if (storeFile.isFile() && storeFile.length() > 10) {
-                log.warn("Stage 8 · 清单为空但向量文件 {} 有内容（{} bytes），"
+            if (Files.isRegularFile(storePath) && storePath.toFile().length() > 10) {
+                log.warn("{} 清单为空但向量文件 {} 有内容（{} bytes），"
                                 + "已忽略以避免产生孤儿向量。重新入库即可对齐。",
-                        storeFile.getAbsolutePath(), storeFile.length());
+                        tag(), storePath, storePath.toFile().length());
             } else {
-                log.info("Stage 8 · 清单为空，知识库从空开始。"
-                        + "调用 GET /stage8/kb/ingest-sample 可一键载入内置示例语料。");
+                log.info("{} 清单为空，知识库从空开始。", tag());
             }
             return;
         }
 
-        log.info("Stage 8 · 已从磁盘恢复清单：{} 篇文档 / {} 个片段（{}）",
-                manifest.size(), totalChunks(), manifestPath);
+        log.info("{} 已从磁盘恢复清单：{} 篇文档 / {} 个片段（{}）",
+                tag(), manifest.size(), totalChunks(), manifestPath);
 
-        if (storeFile.isFile()) {
-            vectorStore.load(storeFile);
-            log.info("Stage 8 · 向量已从 {} 载入完成", storeFile.getAbsolutePath());
+        if (Files.isRegularFile(storePath)) {
+            store.load(storePath.toFile());
+            log.info("{} 向量已从 {} 载入完成", tag(), storePath);
         } else {
-            // 清单有、向量没有：账本记得 11 块，但库里是空的。
-            // 这种不一致必须响亮地说出来，否则「检索不到」会被误判成检索算法有问题。
-            log.warn("Stage 8 · 清单有 {} 篇文档，但向量文件 {} 不存在 —— "
-                            + "检索结果会是空的。重新执行一次入库即可对齐。",
-                    manifest.size(), storeFile.getAbsolutePath());
+            log.warn("{} 清单有 {} 篇文档，但向量文件 {} 不存在 —— 检索结果会是空的。"
+                            + "重新执行一次入库即可对齐。",
+                    tag(), manifest.size(), storePath);
         }
     }
 
@@ -207,13 +253,14 @@ public class KnowledgeBaseService {
     // ==================================================================
 
     /**
-     * 把一段纯文本切块并写入向量库。
+     * 把一段纯文本切块并写入本库。
      *
      * @param title   文档标题，会写进每个片段的 metadata（检索后用于「认出处」）
      * @param content 正文
      * @param source  来源标识，内置示例传文件名，接口调用传 "api"
      */
-    public IngestRecord ingest(String title, String content, String source) {
+    public synchronized IngestRecord ingest(String title, String content, String source) {
+        ensureLoaded();
         Objects.requireNonNull(content, "content 不能为 null");
         String safeTitle = (title == null || title.isBlank()) ? "未命名文档" : title.trim();
 
@@ -223,12 +270,13 @@ public class KnowledgeBaseService {
 
         List<Document> chunks = chunk(fullText, safeTitle, source);
         if (chunks.isEmpty()) {
-            log.warn("Stage 8 · 「{}」切块后为空（原文 {} 字），已跳过入库", safeTitle, content.length());
-            return new IngestRecord(java.util.UUID.randomUUID().toString(), safeTitle, source,
+            log.warn("{} 「{}」切块后为空（原文 {} 字），已跳过入库",
+                    tag(), safeTitle, content.length());
+            return new IngestRecord(UUID.randomUUID().toString(), safeTitle, source,
                     List.of(), LocalDateTime.now().format(TS));
         }
 
-        vectorStore.add(chunks);
+        store.add(chunks);
 
         IngestRecord record = new IngestRecord(
                 chunks.get(0).getId(),
@@ -241,8 +289,8 @@ public class KnowledgeBaseService {
         manifest.put(record.id(), record);
         persist();
 
-        log.info("Stage 8 · 入库完成：「{}」{} 字 → {} 块（来源 {}）",
-                safeTitle, content.length(), chunks.size(), source);
+        log.info("{} 入库完成：「{}」{} 字 → {} 块（来源 {}）",
+                tag(), safeTitle, content.length(), chunks.size(), source);
         return record;
     }
 
@@ -251,10 +299,11 @@ public class KnowledgeBaseService {
      *
      * <p>用 {@link TextReader} 而不是自己读流：它会把资源标识写进 metadata，
      * 是 Spring AI 里读取「整个文档」的标准入口
-     * （PDF/Word 换 {@code TikaDocumentReader}、JSON 换 {@code JsonReader}，
-     * 拿到的都是同一种 {@code List<Document>}，后面的链路完全不用改）。
+     * （PDF/Word 换 {@code TikaDocumentReader}，拿到的都是同一种
+     * {@code List<Document>}，后面的链路完全不用改）。
      */
-    public List<IngestRecord> ingestSampleDocs() {
+    public synchronized List<IngestRecord> ingestSampleDocs() {
+        ensureLoaded();
         Resource[] resources;
         try {
             resources = resourceResolver.getResources(SAMPLE_PATTERN);
@@ -288,13 +337,14 @@ public class KnowledgeBaseService {
     // ==================================================================
 
     /**
-     * 纯向量检索 —— <b>不经过大模型</b>。这是 L1 最该先看的接口：
+     * 纯向量检索 —— <b>不经过大模型</b>。这是最该先看的接口：
      * 它把「检索质量」和「模型发挥」这两件事解耦了。
      *
      * <p>如果这个接口返回的片段里根本没有答案，那问题一定在入库或检索侧，
      * 再怎么调提示词也没用 —— 这是排查 RAG「答非所问」时的第一步。
      */
-    public List<Document> search(String query, Integer topK, Double similarityThreshold) {
+    public synchronized List<Document> search(String query, Integer topK, Double similarityThreshold) {
+        ensureLoaded();
         SearchRequest request = SearchRequest.builder()
                 .query(query)
                 .topK(topK == null ? props.getTopK() : topK)
@@ -302,7 +352,7 @@ public class KnowledgeBaseService {
                         ? props.getSimilarityThreshold() : similarityThreshold)
                 .build();
         // 注意：没有命中时 SimpleVectorStore 返回 null，而不是空列表。
-        List<Document> hits = vectorStore.similaritySearch(request);
+        List<Document> hits = store.similaritySearch(request);
         return hits == null ? List.of() : hits;
     }
 
@@ -312,7 +362,7 @@ public class KnowledgeBaseService {
      * 同时还会往 metadata 里塞一个 {@code distance = 1 - score}，
      * 两个方向都有人用，容易混，这里统一只暴露 score。
      */
-    public List<Hit> searchAsHits(String query, Integer topK, Double similarityThreshold) {
+    public synchronized List<Hit> searchAsHits(String query, Integer topK, Double similarityThreshold) {
         return search(query, topK, similarityThreshold).stream()
                 .map(d -> new Hit(
                         d.getId(),
@@ -324,12 +374,26 @@ public class KnowledgeBaseService {
                 .toList();
     }
 
+    /**
+     * 供 {@code QuestionAnswerAdvisor} 使用的向量库句柄。
+     * <p>返回前先 {@code ensureLoaded()}，避免「第一次问答时库还没读盘、检索恒为空」。
+     */
+    public synchronized SimpleVectorStore store() {
+        ensureLoaded();
+        return store;
+    }
+
     // ==================================================================
     // 统计 / 清理 / 落盘
     // ==================================================================
 
-    public Stats stats() {
+    public synchronized Stats stats() {
+        ensureLoaded();
         return new Stats(
+                meta.id(),
+                meta.name(),
+                meta.description(),
+                meta.createdAt(),
                 manifest.size(),
                 totalChunks(),
                 embeddingModel.dimensions(),
@@ -339,25 +403,26 @@ public class KnowledgeBaseService {
                 props.getChunkSize(),
                 props.getMinChunkSizeChars(),
                 props.getMinChunkLengthToEmbed(),
-                props.getStorePath(),
-                new File(props.getStorePath()).isFile(),
+                storeFile().toString(),
+                Files.isRegularFile(storeFile()),
                 manifest.values().stream()
                         .map(r -> new DocBrief(r.title(), r.source(), r.chunkIds().size(), r.ingestedAt()))
                         .toList());
     }
 
-    /** 清空向量库与清单。 */
-    public int clear() {
+    /** 清空本库的向量与清单（保留库本身）。 */
+    public synchronized int clear() {
+        ensureLoaded();
         List<String> ids = manifest.values().stream()
                 .flatMap(r -> r.chunkIds().stream())
                 .toList();
         if (!ids.isEmpty()) {
-            vectorStore.delete(ids);
+            store.delete(ids);
         }
         int removed = ids.size();
         manifest.clear();
         persist();
-        log.info("Stage 8 · 知识库已清空，共删除 {} 个片段", removed);
+        log.info("{} 知识库已清空，共删除 {} 个片段", tag(), removed);
         return removed;
     }
 
@@ -366,44 +431,53 @@ public class KnowledgeBaseService {
      * 已经会自动落盘（见类注释里那个「代际不一致」的坑）。
      * 保留这个显式入口，是为了让你能主动确认「磁盘上那份到底是什么」。
      */
-    public Map<String, Object> saveToDisk() {
-        File file = new File(props.getStorePath());
+    public synchronized Map<String, Object> saveToDisk() {
+        ensureLoaded();
+        File file = storeFile().toFile();
         File parent = file.getParentFile();
         if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
             throw new IllegalStateException("无法创建目录：" + parent.getAbsolutePath());
         }
-        vectorStore.save(file);
+        store.save(file);
         persistManifest();
         Map<String, Object> result = new LinkedHashMap<>();
+        result.put("knowledgeBase", meta.id());
         result.put("storePath", file.getAbsolutePath());
         result.put("sizeBytes", file.length());
         result.put("documents", manifest.size());
         result.put("chunks", totalChunks());
-        log.info("Stage 8 · 向量库已落盘：{}（{} bytes，{} 篇 / {} 块）",
-                file.getAbsolutePath(), file.length(), manifest.size(), totalChunks());
+        log.info("{} 向量库已落盘：{}（{} bytes，{} 篇 / {} 块）",
+                tag(), file.getAbsolutePath(), file.length(), manifest.size(), totalChunks());
         return result;
     }
 
-    /** 从磁盘载入向量库。 */
-    public Map<String, Object> loadFromDisk() {
-        File file = new File(props.getStorePath());
+    /** 从磁盘载入向量库（清单口径以内存中的为准）。 */
+    public synchronized Map<String, Object> loadFromDisk() {
+        ensureLoaded();
+        File file = storeFile().toFile();
         if (!file.isFile()) {
             throw new IllegalStateException("向量库文件不存在：" + file.getAbsolutePath()
-                    + "，请先调用 /stage8/kb/save");
+                    + "，请先调用 /stage8/kb/" + meta.id() + "/save");
         }
-        vectorStore.load(file);
+        store.load(file);
         Map<String, Object> result = new LinkedHashMap<>();
+        result.put("knowledgeBase", meta.id());
         result.put("storePath", file.getAbsolutePath());
         result.put("documents", manifest.size());
         result.put("chunks", totalChunks());
-        log.info("Stage 8 · 向量库已从 {} 载入（清单口径 {} 篇 / {} 块）",
-                file.getAbsolutePath(), manifest.size(), totalChunks());
+        log.info("{} 向量库已从 {} 载入（清单口径 {} 篇 / {} 块）",
+                tag(), file.getAbsolutePath(), manifest.size(), totalChunks());
         return result;
     }
 
     // ==================================================================
     // 内部实现
     // ==================================================================
+
+    /** 日志前缀：多库混在一起时，没有这个根本分不清是哪条日志。 */
+    private String tag() {
+        return "Stage 8[" + meta.id() + "] ·";
+    }
 
     private List<Document> chunk(String text, String title, String source) {
         List<Document> raw = splitter.apply(List.of(new Document(text)));
@@ -434,54 +508,50 @@ public class KnowledgeBaseService {
         if (stale.isEmpty()) {
             return;
         }
-        vectorStore.delete(stale);
+        store.delete(stale);
         manifest.values().removeIf(r -> source.equals(r.source()));
-        log.info("Stage 8 · 来源 {} 已存在，先清掉旧的 {} 个片段再重新入库", source, stale.size());
+        log.info("{} 来源 {} 已存在，先清掉旧的 {} 个片段再重新入库", tag(), source, stale.size());
     }
 
     private int totalChunks() {
         return manifest.values().stream().mapToInt(r -> r.chunkIds().size()).sum();
     }
 
-    private Path manifestPath() {
-        return Path.of(props.getStorePath() + ".manifest.tsv");
-    }
-
     /**
      * 变更后一次性写盘（向量 + 清单），保证两者永远同一代际。
      *
      * <p>这里用「写入量换一致性」：向量文件约 166KB / 11 块，每次入库都重写一遍。
-     * 对 L1 这种千级片段的规模完全没问题；真到几十万块时，
-     * 正确做法就不是「反复全量写文件」了，而是换成数据库或专业向量库
+     * 对千级片段的规模完全没问题；真到几十万块时，正确做法就不是
+     * 「反复全量写文件」了，而是换成数据库或专业向量库
      * （它们本来就负责持久化，不需要你在应用层操心）。
      */
     private void persist() {
-        File storeFile = new File(props.getStorePath());
+        File storeFile = storeFile().toFile();
         File parent = storeFile.getParentFile();
         if (parent != null && !parent.isDirectory()) {
             parent.mkdirs();
         }
         try {
-            vectorStore.save(storeFile);
+            store.save(storeFile);
         } catch (RuntimeException e) {
-            log.warn("Stage 8 · 向量落盘失败（不影响本次检索）：{}", e.getMessage());
+            log.warn("{} 向量落盘失败（不影响本次检索）：{}", tag(), e.getMessage());
         }
         persistManifest();
     }
 
     private void persistManifest() {
-        Path path = manifestPath();
+        Path path = manifestFile();
         try {
             if (path.getParent() != null) {
                 Files.createDirectories(path.getParent());
             }
             List<String> lines = manifest.values().stream()
-                    .map(KnowledgeBaseService::toManifestLine)
+                    .map(KnowledgeBase::toManifestLine)
                     .toList();
             Files.write(path, lines, StandardCharsets.UTF_8);
         } catch (IOException e) {
             // 清单写失败不该让业务失败：向量已经进库了，清单只是加速恢复的辅助。
-            log.warn("Stage 8 · 清单落盘失败（不影响本次检索）：{}", e.getMessage());
+            log.warn("{} 清单落盘失败（不影响本次检索）：{}", tag(), e.getMessage());
         }
     }
 
@@ -538,7 +608,8 @@ public class KnowledgeBaseService {
     }
 
     /** 知识库现状。 */
-    public record Stats(int documents, int chunks, int dimensions, String modelDir,
+    public record Stats(String id, String name, String description, String createdAt,
+                        int documents, int chunks, int dimensions, String modelDir,
                         int topK, double similarityThreshold,
                         int chunkSize, int minChunkSizeChars, int minChunkLengthToEmbed,
                         String storePath, boolean storeFileExists, List<DocBrief> catalog) {

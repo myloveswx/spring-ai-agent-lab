@@ -107,7 +107,7 @@ mvn test
 | 5 | `/stage5/**` | 结构化输出 `.entity()` + `StructuredOutputValidationAdvisor` 自纠错 |
 | 6 | `/stage6/**` | 12 个工具场景 + **渐进式工具披露**（ToolSearchToolCallingAdvisor） |
 | 7 | `/stage7/**` | MCP 客户端接入（默认关闭，按下方步骤开启） |
-| 8 | `/stage8/**` | **RAG 知识库（L1 朴素 RAG）**：本地 ONNX 嵌入 + 向量检索 + QuestionAnswerAdvisor |
+| 8 | `/stage8/**` | **RAG 知识库（L1 朴素 RAG，支持多库）**：本地 ONNX 嵌入 + 向量检索 + QuestionAnswerAdvisor；一库一目录，物理隔离 |
 
 ---
 
@@ -321,13 +321,18 @@ Stage 8 补上第三种信息源：**你自己的资料**。
 L5 Agentic 自主检索）都是在往这三个环节里加料。所以 L1 的目标不是效果好，
 而是**先把链路跑通、并且能直接看见「检索到底命中了什么」**。
 
-#### 三个 Bean，各自解决什么问题
+#### 三个组件，各自解决什么问题、由谁创建
 
-| Bean | 职责 | 为什么必须自己声明 |
-|---|---|---|
-| `TransformersEmbeddingModel` | 文本 → 向量 | DeepSeek **没有** embedding 接口，嵌入只能另找一家；这里用本机 ONNX 模型，完全离线 |
-| `SimpleVectorStore` | 存向量 + 相似度检索 | 本机无 Docker，不引外部向量库；它是「一个 Map + 遍历算余弦」，千级片段够用 |
-| `QuestionAnswerAdvisor` | 「检索 → 拼 Prompt」这段胶水 | `spring-ai-vector-store-advisor` 里**只有类、没有自动配置** |
+| 组件 | 职责 | 谁创建 | 为什么 |
+|---|---|---|---|
+| `TransformersEmbeddingModel` | 文本 → 向量 | `Stage8RagConfig`（**单例**） | DeepSeek **没有** embedding 接口，嵌入只能另找一家；这里用本机 ONNX 模型，完全离线。它无状态，所有知识库共用同一个实例 |
+| `SimpleVectorStore` | 存向量 + 相似度检索 | `KnowledgeBaseRegistry`（**每个库一个**） | 本机无 Docker，不引外部向量库；它是「一个 Map + 遍历算余弦」，千级片段够用 |
+| `QuestionAnswerAdvisor` | 「检索 → 拼 Prompt」这段胶水 | `RagAdvisors.forStore(store, props)`（**按库现造**） | `spring-ai-vector-store-advisor` 里**只有类、没有自动配置**；而且它与 store 是一对一绑定的，多库只能现造 |
+
+> 一条通用的重构信号：**当某个 Bean 从「全局唯一」变成「每份数据一个」时，
+> 它就该从 `@Configuration` 里搬出去，交给管理那份数据的人去创建。**
+> 把 `SimpleVectorStore` 硬留在配置类里，得到的是「所有知识库共用一份向量」——
+> 而且它不会抛异常，只会静默地把数据混在一起。
 
 #### 快速体验（按这个顺序最有感知）
 
@@ -354,16 +359,136 @@ curl --noproxy '*' "http://localhost:8090/stage8/chat/compare?message=%E5%80%BC%
 
 #### 接口一览
 
+**库管理**（只动元数据，不碰向量）
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/stage8/kb/ingest` | 传 `{title, content}`，切块入库 |
-| POST | `/stage8/kb/ingest-sample` | 载入 `resources/rag/*.md`（幂等，可重复调用） |
-| GET | `/stage8/kb/search` | **纯向量检索，不调模型**（可选 `topK` / `threshold`） |
-| GET | `/stage8/kb/stats` | 文档数、块数、维度、参数、落盘状态、清单 |
-| DELETE | `/stage8/kb` | 清空（重置对照实验用） |
-| POST | `/stage8/kb/save` / `/load` | 向量库落盘 / 载入 |
-| GET | `/stage8/chat` | RAG 问答 |
-| GET | `/stage8/chat/compare` | 无 RAG vs 有 RAG 对照 |
+| GET | `/stage8/kb` | 列出全部知识库（id / 名称 / 备注 / 创建时间 / 是否已加载） |
+| POST | `/stage8/kb` | 建库，body `{id, name, description}`；id 只允许 `[A-Za-z0-9_-]` |
+| DELETE | `/stage8/kb/{kbId}` | **删除**知识库（连目录一起）；默认库不允许删 |
+
+**库内操作**（`{kbId}` 换成具体库 id；**不带 kbId 的老路径等价于 `default` 库**）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/stage8/kb/{kbId}/ingest` | 传 `{title, content}`，切块入库 |
+| POST | `/stage8/kb/{kbId}/ingest-sample` | 载入 `resources/rag/*.md`（幂等，可重复调用） |
+| GET | `/stage8/kb/{kbId}/search` | **纯向量检索，不调模型**（可选 `topK` / `threshold`） |
+| GET | `/stage8/kb/{kbId}/stats` | 文档数、块数、维度、参数、落盘状态、清单 |
+| DELETE | `/stage8/kb/{kbId}/clear` | **清空**该库内容（库本身保留） |
+| POST | `/stage8/kb/{kbId}/save` `/load` | 向量库落盘 / 载入 |
+
+**问答**（`kbId` 可选，不传用 `default`）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/stage8/chat?kbId=kb1&message=...` | 只依据 `kb1` 的资料作答 |
+| GET | `/stage8/chat/compare?kbId=kb1&message=...` | 无 RAG vs 有 RAG 对照（附 `kb1` 的检索命中） |
+
+> 老路径 `/stage8/kb/search`、`/stage8/kb/ingest` 等**依然可用**。
+> 升级一次就作废用户所有既有命令，是很差劲的体验 —— 所以两套路径指向同一段代码。
+
+#### 多知识库：怎么创建「知识库1 / 知识库2」
+
+##### 一库一目录
+
+支持多库之后，`agentlab.rag.store-root` 指的是一个**目录**（不再是单个文件）：
+
+```
+<store-root>/                    # 默认 D:/workspace/.toolchain/rag-store
+├── kb-index.tsv                 # 全部库的元数据（id / 名称 / 备注 / 创建时间）
+├── default/                     # 默认库：不带 kbId 的老接口都落在这里
+│   ├── store.json               # 向量本体
+│   └── manifest.tsv             # 账本：哪几篇、各几块
+├── kb1/
+│   ├── store.json
+│   └── manifest.tsv
+└── kb2/
+    └── ...
+```
+
+选**物理隔离**（一库一目录一向量库）而不是「单库 + metadata 过滤」，主要理由就是这张图：
+`ls` 一眼看清有几个库、每个库多大，删库就是删目录，A 库的操作碰不到 B 库的文件。
+
+顺带一个刻意的设计：**向量的加载是懒的**。启动时只恢复「有哪些库」这份元数据，
+某个库的向量要等它第一次被访问（检索 / 入库 / 问答）才读盘。
+20 个库的元数据读起来几毫秒，20 个库的向量读起来可能是几秒 + 几百 MB ——
+「列个表」不该产生这种副作用。所以 `GET /stage8/kb` 里 `loaded=false` 的库，
+文档数会显示 `-1`（未知），而不是为了填这个数字把所有库都读进内存。
+
+##### 建库 / 列库 / 删库
+
+```bash
+# 建库。id 走 URL 和目录名，只允许 [A-Za-z0-9_-]；name 是给人看的标签。
+curl --noproxy '*' -X POST "http://localhost:8090/stage8/kb" \
+     -H "Content-Type: application/json" -d '{"id":"kb1","name":"kb-1"}'
+curl --noproxy '*' -X POST "http://localhost:8090/stage8/kb" \
+     -H "Content-Type: application/json" -d '{"id":"kb2","name":"kb-2"}'
+
+# 列库：能看到 root 目录、库数量、每个库的名称与「是否已加载」
+curl --noproxy '*' "http://localhost:8090/stage8/kb"
+
+# 删库（连同目录）。默认库不允许删，只能清空。
+curl --noproxy '*' -X DELETE "http://localhost:8090/stage8/kb/kb2"
+```
+
+**⚠️ 中文不要放进命令行参数。** Windows + Git Bash 下，argv 里的中文交给原生 `curl.exe`
+时会被按 GBK 转换，服务端以非法 UTF-8 拒绝（400，`Invalid UTF-8 start byte 0xb2`）。
+想给中文 `name`、或者入库中文 `title` / `content`，就把请求体写成 UTF-8 文件再发：
+
+```bash
+# 先用编辑器把这个文件另存为 UTF-8（不要用命令行 echo 中文）
+# 文件内容：{"id":"kb1","name":"知识库1"}
+curl --noproxy '*' -X POST "http://localhost:8090/stage8/kb" \
+     -H "Content-Type: application/json" --data-binary @D:/workspace/.toolchain/_logs/kb1.json
+```
+
+（Swagger UI 里直接打字没有这个毛病 —— 那是浏览器发请求，不经过 shell。）
+
+##### 验证「互不干扰」
+
+```bash
+# 往 kb1 灌一份只有它才有的资料（这里用 ASCII 便于直接粘进终端）
+curl --noproxy '*' -X POST "http://localhost:8090/stage8/kb/kb1/ingest" \
+     -H "Content-Type: application/json" \
+     -d '{"title":"AAA-project","content":"AAA project acceptance: green-light rate 97%, owner Zhang San."}'
+
+# 同一个 query，两个库各搜一次
+curl --noproxy '*' "http://localhost:8090/stage8/kb/kb1/search?query=AAA%20project%20acceptance"
+#   → 命中刚入库那条
+curl --noproxy '*' "http://localhost:8090/stage8/kb/kb2/search?query=AAA%20project%20acceptance"
+#   → []   —— kb2 里根本没有这条，物理隔离成立
+
+# 再各载入一遍内置示例语料，然后清空 kb1：
+curl --noproxy '*' -X POST "http://localhost:8090/stage8/kb/kb1/ingest-sample"
+curl --noproxy '*' -X POST "http://localhost:8090/stage8/kb/kb2/ingest-sample"
+curl --noproxy '*' -X DELETE "http://localhost:8090/stage8/kb/kb1/clear"
+curl --noproxy '*' "http://localhost:8090/stage8/kb/kb2/stats"
+#   → documents 仍然是 3 —— 清空 kb1 没动到 kb2
+```
+
+##### 两种隔离方案怎么选
+
+| | A · 物理隔离（本项目） | B · 逻辑隔离 |
+|---|---|---|
+| 做法 | 每库一个 `SimpleVectorStore` + 一个目录 | 共用一个 store，片段 metadata 打 `kbId`，检索时 `filterExpression("kbId == 'kb1'")` |
+| 建库 / 删库 | 建目录 / 删目录，物理上彻底隔开 | 只改元数据，不动存储 |
+| 内存占用 | 随「活跃库数」线性增长（配合懒加载可控） | 一份，与库数无关 |
+| 检索开销 | 只在本库的向量里算相似度 | 若实现是「全量算完再过滤」，库越多、单库越小，浪费越大 |
+| 并发 | 锁按库隔离：灌 kb1 不阻塞 kb2 检索 | 同一个 store，写操作容易互相阻塞 |
+| 误伤风险 | 几乎为零 | filter 写错一个字符，就可能读到别的库的内容 |
+
+`SimpleVectorStore` **是支持 `filterExpression` 的**（它内部有
+`SimpleVectorStoreFilterExpressionEvaluator`），所以 B 方案在本项目里也跑得通。
+这里选 A，是因为「知识库」在用户脑中的语义就是「一个独立的东西」，
+用文件系统来表达最自然、最好观察。
+
+但要说清楚：**生产环境更常用 B**。专业向量库（Milvus / Qdrant / PGVector…）的
+`filterExpression` 是**走索引**的 —— 先把候选集收敛到这个小分区，再算相似度，
+而不是内存里逐条判断。所以「一张表存所有租户、用 metadata 过滤」反而是标准做法，运维成本也低得多。
+换句话说：**A 是「用文件系统做隔离」的教学版，B 是「用数据库做隔离」的生产版**。
+往下走时把 `VectorStore` 换成自研 MySQL 实现、顺手把 kbId 做成一列或一个分区，
+就自然变成了 B —— 接口不用改，只改实现。
 
 #### 要点
 
@@ -714,11 +839,14 @@ spring-ai-agent-lab/
 │   │   ├── config/Stage6ToolConfig.java
 │   │   └── tools/CrmTools.java
 │   ├── stage7/McpClientController.java       # MCP 客户端（条件装配）
-│   ├── stage8/                               # RAG 知识库（L1 朴素 RAG）
-│   │   ├── config/RagProperties.java         # agentlab.rag.* 可调参数（topK/阈值/切块/预热）
-│   │   ├── config/Stage8RagConfig.java       # Embedding / VectorStore / QA Advisor + 预热
-│   │   ├── KnowledgeBaseService.java         # 切块 + 入库 + 检索 + 清单管理 + 落盘
-│   │   └── Stage8RagController.java          # /stage8/kb/** 与 /stage8/chat[/compare]
+│   ├── stage8/                               # RAG 知识库（L1 朴素 RAG，支持多库）
+│   │   ├── config/RagProperties.java         # agentlab.rag.* 可调参数（topK/阈值/切块/预热/store-root）
+│   │   ├── config/Stage8RagConfig.java       # 嵌入模型（单例，所有库共用）+ 启动预热
+│   │   ├── config/RagAdvisors.java           # 中文提示词 + 按库现造 QuestionAnswerAdvisor
+│   │   ├── KnowledgeBase.java                # 一个库：切块 + 入库 + 检索 + 清单 + 落盘（懒加载）
+│   │   ├── KnowledgeBaseMeta.java            # 库的元数据（id / 名称 / 备注 / 创建时间）
+│   │   ├── KnowledgeBaseRegistry.java        # 多库注册表：建/查/列/删 + kb-index.tsv 账本
+│   │   └── Stage8RagController.java          # /stage8/kb[/{kbId}]/** 与 /stage8/chat[/compare]
 │   ├── persistence/                          # 持久层（MyBatis-Plus）
 │   │   ├── entity/ChatMemoryEntity.java      # @TableName 映射（无主键、关键字列名转义）
 │   │   ├── mapper/ChatMemoryMapper.java      # extends BaseMapper，零 XML
@@ -737,7 +865,9 @@ spring-ai-agent-lab/
     ├── OpenApiDocsTest.java                  # 真实 HTTP 校验 /v3/api-docs 与 Swagger UI
     ├── stage3/ToolsTest.java                 # 工具单测
     ├── stage6/lab/ToolIndexLabTest.java      # 四条检索策略的纯单测（可复现）
-    └── stage8/Stage8RagTest.java             # RAG 检索侧单测（全程离线，不调用 DeepSeek）
+    └── stage8/
+        ├── Stage8RagTest.java                # 默认库基线：检索侧单测（全程离线，不调用 DeepSeek）
+        └── Stage8MultiKnowledgeBaseTest.java # 多库：库间隔离、删库不影响别的库、边界状态码
 ```
 
 ---

@@ -121,12 +121,16 @@ agentlab:
     # 想更保守（宁可多给线索）调到 0.3 左右；想更严格调到 0.6。
     similarity-threshold: 0.5
 
-    # 向量库落盘位置。
-    # SimpleVectorStore 是内存实现，重启即丢；这里在每次入库/清空后自动落盘
-    # （清单 + 向量一起写，保证两者代际一致），重启时自动恢复，不必重跑嵌入。
-    # 注意：清单（*.manifest.tsv）是权威账本，清单里没有的向量一律不认 ——
-    # 这样才不会出现「删不掉的孤儿向量」。
-    store-path: ${AGENTLAB_RAG_STORE_PATH:D:/workspace/.toolchain/rag-store/stage8-store.json}
+    # 知识库根目录（注意是「目录」，不是文件）。
+    # 支持多知识库后，每个库在它下面占一个以自己 id 命名的子目录：
+    #   <root>/kb-index.tsv              全部库的元数据（id/名称/备注/创建时间）
+    #   <root>/default/store.json        默认库的向量（不带 kbId 的老接口都落在这里）
+    #   <root>/default/manifest.tsv      默认库的账本
+    #   <root>/kb1/store.json + manifest.tsv
+    # 每个库一个目录 = 物理隔离：删库就是删目录，互不干扰，ls 一眼能看清有几个库。
+    # 注意：manifest 是权威账本，清单里没有的向量一律不认 —— 否则会出现删不掉的孤儿向量。
+    # 旧配置 agentlab.rag.store-path（单文件）已废弃；那份数据会在启动时自动迁移进 default/。
+    store-root: ${AGENTLAB_RAG_STORE_ROOT:D:/workspace/.toolchain/rag-store}
 
     # 启动时预热一次嵌入。首次调用 ONNX 会解压原生库 + 触发 Defender 首扫，
     # 实测 60 秒以上；不预热的话这 60 秒会砸在用户的第一次提问上。
